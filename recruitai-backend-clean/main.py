@@ -7,20 +7,52 @@ import os
 from contextlib import asynccontextmanager
 import logging
 
-# Import routers
-try:
-    from app.routers import auth
-    from app.database import init_db
-    from app.models import User
-except ImportError as e:
-    print(f"Import warning: {e}")
-    # Create minimal auth router if import fails
-    from fastapi import APIRouter
-    auth = APIRouter()
-
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Import auth router with fallback
+auth_router = None
+try:
+    from app.routers.auth import router as auth_router
+    logger.info("Successfully imported auth router from app.routers.auth")
+except ImportError as e:
+    logger.warning(f"Failed to import from app.routers.auth: {e}")
+    try:
+        # Try direct import from current directory
+        import sys
+        sys.path.append('/opt/render/project/src/recruitai-backend-clean')
+        from auth import router as auth_router
+        logger.info("Successfully imported auth router from direct path")
+    except ImportError as e2:
+        logger.error(f"Failed to import auth router: {e2}")
+        # Create minimal auth router as fallback
+        from fastapi import APIRouter
+        from pydantic import BaseModel
+        
+        auth_router = APIRouter()
+        
+        class LoginRequest(BaseModel):
+            email: str
+            password: str
+            
+        @auth_router.post("/login")
+        async def fallback_login(request: LoginRequest):
+            return {
+                "success": False,
+                "message": "Auth module not properly configured",
+                "error": "Backend authentication system needs configuration"
+            }
+            
+        @auth_router.post("/register") 
+        async def fallback_register(request: dict):
+            return {
+                "success": False,
+                "message": "Auth module not properly configured", 
+                "error": "Backend authentication system needs configuration"
+            }
+        
+        logger.info("Created fallback auth router")
 
 # Lifespan context manager for startup/shutdown events
 @asynccontextmanager
@@ -29,9 +61,12 @@ async def lifespan(app: FastAPI):
     logger.info("Starting RecruitAI Backend...")
     try:
         # Initialize database if available
-        if 'init_db' in globals():
+        try:
+            from app.database import init_db
             await init_db()
             logger.info("Database initialized successfully")
+        except ImportError:
+            logger.info("Database module not available, skipping initialization")
     except Exception as e:
         logger.warning(f"Database initialization failed: {e}")
     
@@ -80,7 +115,8 @@ async def root():
         "message": "RecruitAI Backend API is running",
         "status": "healthy",
         "version": "1.0.0",
-        "docs": "/docs"
+        "docs": "/docs",
+        "auth_router_status": "loaded" if auth_router else "fallback"
     }
 
 @app.get("/health")
@@ -88,7 +124,8 @@ async def health_check():
     return {
         "status": "healthy",
         "service": "RecruitAI Backend",
-        "timestamp": "2024-01-01T00:00:00Z"
+        "timestamp": "2024-01-01T00:00:00Z",
+        "auth_available": auth_router is not None
     }
 
 # API status endpoint
@@ -97,7 +134,7 @@ async def api_status():
     return {
         "api_status": "operational",
         "endpoints": {
-            "auth": "available",
+            "auth": "available" if auth_router else "fallback",
             "health": "available"
         },
         "cors_enabled": True,
@@ -106,8 +143,12 @@ async def api_status():
         ]
     }
 
-# Include authentication router - FIXED: removed .router
-app.include_router(auth, prefix="/api/auth", tags=["authentication"])
+# Include authentication router
+if auth_router:
+    app.include_router(auth_router, prefix="/api/auth", tags=["authentication"])
+    logger.info("Auth router included successfully")
+else:
+    logger.error("Auth router not available")
 
 # Global exception handler
 @app.exception_handler(Exception)
