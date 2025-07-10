@@ -106,8 +106,8 @@ async def api_status():
         ]
     }
 
-# Include authentication router
-app.include_router(auth.router, prefix="/api/auth", tags=["authentication"])
+# Include authentication router - FIXED: removed .router
+app.include_router(auth, prefix="/api/auth", tags=["authentication"])
 
 # Global exception handler
 @app.exception_handler(Exception)
