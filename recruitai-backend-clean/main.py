@@ -1,125 +1,158 @@
-"""
-RecruitAI Backend - FastAPI Application
-AI-Powered Recruitment Platform
-"""
-
 from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.responses import JSONResponse
 import uvicorn
 import os
 from contextlib import asynccontextmanager
+import logging
 
-from app.core.database import engine, Base
-from app.core.config import settings
-from app.routers import auth, users, jobs, candidates, interviews, resumes, analytics, credits
+# Import routers
+try:
+    from app.routers import auth
+    from app.database import init_db
+    from app.models import User
+except ImportError as e:
+    print(f"Import warning: {e}")
+    # Create minimal auth router if import fails
+    from fastapi import APIRouter
+    auth = APIRouter()
 
-# Create database tables
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Lifespan context manager for startup/shutdown events
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
-    Base.metadata.create_all(bind=engine)
+    logger.info("Starting RecruitAI Backend...")
+    try:
+        # Initialize database if available
+        if 'init_db' in globals():
+            await init_db()
+            logger.info("Database initialized successfully")
+    except Exception as e:
+        logger.warning(f"Database initialization failed: {e}")
+    
     yield
+    
     # Shutdown
-    pass
+    logger.info("Shutting down RecruitAI Backend...")
 
-# Initialize FastAPI app
+# Create FastAPI app with lifespan
 app = FastAPI(
-    title="RecruitAI API",
-    description="AI-Powered Recruitment Platform - Backend API",
+    title="RecruitAI Backend API",
+    description="AI-Powered Recruitment Platform Backend",
     version="1.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
     lifespan=lifespan
 )
 
-# CORS middleware
+# Enhanced CORS configuration for production
+origins = [
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:5173",
+    "https://recruiterainew.netlify.app",
+    "https://*.netlify.app",
+    "https://cleanfilesbackend.onrender.com",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, specify exact origins
+    allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
+    expose_headers=["*"]
 )
 
-# Include routers
-app.include_router(auth.router, prefix="/api/auth", tags=["Authentication"])
-app.include_router(users.router, prefix="/api/users", tags=["Users"])
-app.include_router(jobs.router, prefix="/api/jobs", tags=["Jobs"])
-app.include_router(candidates.router, prefix="/api/candidates", tags=["Candidates"])
-app.include_router(interviews.router, prefix="/api/interviews", tags=["Interviews"])
-app.include_router(resumes.router, prefix="/api/resumes", tags=["Resumes"])
-app.include_router(credits.router, prefix="/api/credits", tags=["Credits"])
-app.include_router(analytics.router, prefix="/api/analytics", tags=["Analytics"])
-
-# Static files
-app.mount("/static", StaticFiles(directory="static"), name="static")
+# Security
+security = HTTPBearer(auto_error=False)
 
 # Health check endpoint
+@app.get("/")
+async def root():
+    return {
+        "message": "RecruitAI Backend API is running",
+        "status": "healthy",
+        "version": "1.0.0",
+        "docs": "/docs"
+    }
+
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "message": "RecruitAI API is running"}
+    return {
+        "status": "healthy",
+        "service": "RecruitAI Backend",
+        "timestamp": "2024-01-01T00:00:00Z"
+    }
 
-# Root endpoint
-@app.get("/", response_class=HTMLResponse)
-async def root():
-    return """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>RecruitAI API</title>
-        <style>
-            body { font-family: Arial, sans-serif; margin: 40px; background: #f5f5f5; }
-            .container { max-width: 800px; margin: 0 auto; background: white; padding: 40px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-            h1 { color: #2c3e50; text-align: center; }
-            .feature { margin: 20px 0; padding: 15px; background: #ecf0f1; border-radius: 5px; }
-            .links { text-align: center; margin-top: 30px; }
-            .links a { margin: 0 15px; padding: 10px 20px; background: #3498db; color: white; text-decoration: none; border-radius: 5px; }
-            .links a:hover { background: #2980b9; }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h1>🚀 RecruitAI API</h1>
-            <p style="text-align: center; color: #7f8c8d; font-size: 18px;">AI-Powered Recruitment Platform Backend</p>
-            
-            <div class="feature">
-                <h3>🤖 AI-Powered Interviews</h3>
-                <p>Advanced AI conducts comprehensive video interviews with emotion detection and real-time analysis.</p>
-            </div>
-            
-            <div class="feature">
-                <h3>📄 Smart Resume Matching</h3>
-                <p>Intelligent resume parsing and matching with automatic scoring against job requirements.</p>
-            </div>
-            
-            <div class="feature">
-                <h3>📊 Advanced Analytics</h3>
-                <p>Detailed reports with skill assessments, AI recommendations, and hiring insights.</p>
-            </div>
-            
-            <div class="feature">
-                <h3>💳 Credit System</h3>
-                <p>Flexible credit-based usage model with 10 free credits for new users.</p>
-            </div>
-            
-            <div class="links">
-                <a href="/docs">API Documentation</a>
-                <a href="/health">Health Check</a>
-                <a href="/redoc">ReDoc</a>
-            </div>
-        </div>
-    </body>
-    </html>
-    """
+# API status endpoint
+@app.get("/api/status")
+async def api_status():
+    return {
+        "api_status": "operational",
+        "endpoints": {
+            "auth": "available",
+            "health": "available"
+        },
+        "cors_enabled": True,
+        "frontend_domains": [
+            "recruiterainew.netlify.app"
+        ]
+    }
+
+# Include authentication router
+app.include_router(auth.router, prefix="/api/auth", tags=["authentication"])
+
+# Global exception handler
+@app.exception_handler(Exception)
+async def global_exception_handler(request, exc):
+    logger.error(f"Global exception: {exc}")
+    return JSONResponse(
+        status_code=500,
+        content={
+            "success": False,
+            "message": "Internal server error",
+            "error": "Something went wrong. Please try again later."
+        }
+    )
+
+# 404 handler
+@app.exception_handler(404)
+async def not_found_handler(request, exc):
+    return JSONResponse(
+        status_code=404,
+        content={
+            "success": False,
+            "message": "Endpoint not found",
+            "error": f"The requested endpoint {request.url.path} was not found"
+        }
+    )
+
+# CORS preflight handler
+@app.options("/{full_path:path}")
+async def options_handler(full_path: str):
+    return JSONResponse(
+        content={},
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+        }
+    )
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000))
+    port = int(os.getenv("PORT", 8000))
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
         port=port,
-        reload=False
+        reload=False,
+        log_level="info"
     )
 
