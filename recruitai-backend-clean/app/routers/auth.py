@@ -6,11 +6,9 @@ from passlib.context import CryptContext
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from sqlalchemy import Column, Integer, String, select
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import declarative_base
 import logging
 
-from ..db import get_db  # DB dependency
+from ..db import get_db, Base, AsyncSession  # Fixed import from db.py
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -21,8 +19,6 @@ ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
-
-Base = declarative_base()
 
 class UserDB(Base):
     __tablename__ = "users"
