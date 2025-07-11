@@ -1,306 +1,129 @@
-from fastapi import APIRouter, HTTPException, Depends, status
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel, EmailStr
+from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from pydantic import BaseModel
+from jose import JWTError, jwt
+from passlib.context import CryptContext
+from datetime import datetime, timedelta, timezone
 from typing import Optional
-import jwt
-import hashlib
-import secrets
-from datetime import datetime, timedelta
+from sqlalchemy import Column, Integer, String, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import declarative_base
 import logging
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+from ..db import get_db  # DB dependency
+
+router = APIRouter(prefix="/auth", tags=["auth"])
+
 logger = logging.getLogger(__name__)
 
-# Create router
-router = APIRouter()
-
-# Security
-security = HTTPBearer()
-
-# JWT Configuration
-SECRET_KEY = "recruitai-secret-key-2025-secure"
+SECRET_KEY = "your-secret-key"
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
+ACCESS_TOKEN_EXPIRE_MINUTES = 60
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
 
-# Pydantic models
-class LoginRequest(BaseModel):
-    email: EmailStr
-    password: str
+Base = declarative_base()
 
-class RegisterRequest(BaseModel):
-    email: EmailStr
-    password: str
-    first_name: str
-    last_name: str
+class UserDB(Base):
+    __tablename__ = "users"
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String, unique=True, index=True)
+    hashed_password = Column(String)
+    role = Column(String, default="candidate")
 
-class TokenResponse(BaseModel):
+class Token(BaseModel):
     access_token: str
     token_type: str
-    user: dict
 
-class UserResponse(BaseModel):
-    id: int
+class TokenData(BaseModel):
+    email: Optional[str] = None
+    role: Optional[str] = None
+
+class User(BaseModel):
     email: str
-    first_name: str
-    last_name: str
     role: str
 
-# Mock user database (in production, use real database)
-MOCK_USERS = {
-    "admin@recruitai.com": {
-        "id": 1,
-        "email": "admin@recruitai.com",
-        "password_hash": hashlib.sha256("password123".encode()).hexdigest(),
-        "first_name": "Admin",
-        "last_name": "User",
-        "role": "admin"
-    },
-    "recruiter@recruitai.com": {
-        "id": 2,
-        "email": "recruiter@recruitai.com", 
-        "password_hash": hashlib.sha256("password123".encode()).hexdigest(),
-        "first_name": "Recruiter",
-        "last_name": "User",
-        "role": "recruiter"
-    },
-    "candidate@recruitai.com": {
-        "id": 3,
-        "email": "candidate@recruitai.com",
-        "password_hash": hashlib.sha256("password123".encode()).hexdigest(),
-        "first_name": "Candidate",
-        "last_name": "User", 
-        "role": "candidate"
-    }
-}
+class UserCreate(BaseModel):
+    email: str
+    password: str
+    role: Optional[str] = "candidate"
 
-def hash_password(password: str) -> str:
-    """Hash a password using SHA256"""
-    return hashlib.sha256(password.encode()).hexdigest()
+def verify_password(plain_password, hashed_password):
+    return pwd_context.verify(plain_password, hashed_password)
 
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """Verify a password against its hash"""
-    return hash_password(plain_password) == hashed_password
+def get_password_hash(password):
+    return pwd_context.hash(password)
 
-def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
-    """Create a JWT access token"""
-    to_encode = data.copy()
-    if expires_delta:
-        expire = datetime.utcnow() + expires_delta
-    else:
-        expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    
-    to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-    return encoded_jwt
+async def get_user(db: AsyncSession, email: str):
+    query = select(UserDB).where(UserDB.email == email)
+    result = await db.execute(query)
+    return result.scalar_one_or_none()
 
-def get_user_by_email(email: str):
-    """Get user by email from mock database"""
-    return MOCK_USERS.get(email)
-
-def authenticate_user(email: str, password: str):
-    """Authenticate user with email and password"""
-    user = get_user_by_email(email)
-    if not user:
-        return False
-    if not verify_password(password, user["password_hash"]):
+async def authenticate_user(db: AsyncSession, email: str, password: str):
+    user = await get_user(db, email)
+    if not user or not verify_password(password, user.hashed_password):
         return False
     return user
 
-async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    """Get current user from JWT token"""
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
+    to_encode = data.copy()
+    expire = datetime.now(timezone.utc) + (expires_delta or timedelta(minutes=15))
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+async def get_current_user(token: str = Depends(oauth2_scheme), db: AsyncSession = Depends(get_db)):
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
-    
     try:
-        payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         email: str = payload.get("sub")
         if email is None:
             raise credentials_exception
-    except jwt.PyJWTError:
+        token_data = TokenData(email=email, role=payload.get("role"))
+    except JWTError:
         raise credentials_exception
-    
-    user = get_user_by_email(email)
+    user = await get_user(db, token_data.email)
     if user is None:
         raise credentials_exception
     return user
 
-@router.post("/login", response_model=TokenResponse)
-async def login(request: LoginRequest):
-    """
-    Authenticate user and return access token
-    """
-    try:
-        logger.info(f"Login attempt for email: {request.email}")
-        
-        # Authenticate user
-        user = authenticate_user(request.email, request.password)
-        if not user:
-            logger.warning(f"Failed login attempt for email: {request.email}")
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Incorrect email or password",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
-        
-        # Create access token
-        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-        access_token = create_access_token(
-            data={"sub": user["email"], "role": user["role"]},
-            expires_delta=access_token_expires
-        )
-        
-        # Prepare user data (without password hash)
-        user_data = {
-            "id": user["id"],
-            "email": user["email"],
-            "first_name": user["first_name"],
-            "last_name": user["last_name"],
-            "role": user["role"]
-        }
-        
-        logger.info(f"Successful login for email: {request.email}")
-        
-        return {
-            "access_token": access_token,
-            "token_type": "bearer",
-            "user": user_data
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Login error: {str(e)}")
+@router.post("/login", response_model=Token)
+async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db: AsyncSession = Depends(get_db)):
+    user = await authenticate_user(db, form_data.username, form_data.password)
+    if not user:
+        logger.warning(f"Failed login for {form_data.username}")
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Internal server error during login"
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect email or password",
+            headers={"WWW-Authenticate": "Bearer"},
         )
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": user.email, "role": user.role}, expires_delta=access_token_expires
+    )
+    logger.info(f"Successful login for {user.email}")
+    return {"access_token": access_token, "token_type": "bearer"}
 
-@router.post("/register", response_model=TokenResponse)
-async def register(request: RegisterRequest):
-    """
-    Register new user and return access token
-    """
-    try:
-        logger.info(f"Registration attempt for email: {request.email}")
-        
-        # Check if user already exists
-        if get_user_by_email(request.email):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Email already registered"
-            )
-        
-        # Create new user
-        user_id = len(MOCK_USERS) + 1
-        password_hash = hash_password(request.password)
-        
-        new_user = {
-            "id": user_id,
-            "email": request.email,
-            "password_hash": password_hash,
-            "first_name": request.first_name,
-            "last_name": request.last_name,
-            "role": "candidate"  # Default role
-        }
-        
-        # Add to mock database
-        MOCK_USERS[request.email] = new_user
-        
-        # Create access token
-        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-        access_token = create_access_token(
-            data={"sub": new_user["email"], "role": new_user["role"]},
-            expires_delta=access_token_expires
-        )
-        
-        # Prepare user data (without password hash)
-        user_data = {
-            "id": new_user["id"],
-            "email": new_user["email"],
-            "first_name": new_user["first_name"],
-            "last_name": new_user["last_name"],
-            "role": new_user["role"]
-        }
-        
-        logger.info(f"Successful registration for email: {request.email}")
-        
-        return {
-            "access_token": access_token,
-            "token_type": "bearer",
-            "user": user_data
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Registration error: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Internal server error during registration"
-        )
+@router.post("/register", response_model=Token)
+async def register_user(user_create: UserCreate, db: AsyncSession = Depends(get_db)):
+    existing_user = await get_user(db, user_create.email)
+    if existing_user:
+        raise HTTPException(status_code=400, detail="Email already registered")
+    hashed_password = get_password_hash(user_create.password)
+    new_user = UserDB(email=user_create.email, hashed_password=hashed_password, role=user_create.role)
+    db.add(new_user)
+    await db.commit()
+    await db.refresh(new_user)
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": new_user.email, "role": new_user.role}, expires_delta=access_token_expires
+    )
+    logger.info(f"New user registered: {user_create.email}")
+    return {"access_token": access_token, "token_type": "bearer"}
 
-@router.get("/me", response_model=UserResponse)
-async def get_current_user_info(current_user: dict = Depends(get_current_user)):
-    """
-    Get current user information
-    """
-    return {
-        "id": current_user["id"],
-        "email": current_user["email"],
-        "first_name": current_user["first_name"],
-        "last_name": current_user["last_name"],
-        "role": current_user["role"]
-    }
-
-@router.post("/logout")
-async def logout():
-    """
-    Logout user (client should remove token)
-    """
-    return {"message": "Successfully logged out"}
-
-@router.get("/demo-credentials")
-async def get_demo_credentials():
-    """
-    Get demo credentials for testing
-    """
-    return {
-        "credentials": [
-            {
-                "role": "admin",
-                "email": "admin@recruitai.com",
-                "password": "password123",
-                "description": "Full admin access"
-            },
-            {
-                "role": "recruiter", 
-                "email": "recruiter@recruitai.com",
-                "password": "password123",
-                "description": "Recruiter access"
-            },
-            {
-                "role": "candidate",
-                "email": "candidate@recruitai.com", 
-                "password": "password123",
-                "description": "Candidate access"
-            }
-        ]
-    }
-
-# Health check for auth module
-@router.get("/health")
-async def auth_health():
-    """
-    Check authentication module health
-    """
-    return {
-        "status": "healthy",
-        "module": "authentication",
-        "users_count": len(MOCK_USERS),
-        "demo_available": True
-    }
-
+@router.get("/me", response_model=User)
+async def read_users_me(current_user: UserDB = Depends(get_current_user)):
+    return {"email": current_user.email, "role": current_user.role}
