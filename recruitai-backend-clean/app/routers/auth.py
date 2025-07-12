@@ -1,307 +1,388 @@
-
-
-
 from fastapi import APIRouter, HTTPException, Depends, status
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, OAuth2PasswordBearer
-from sqlalchemy.orm import Session
-from datetime import datetime, timedelta
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from pydantic import BaseModel, EmailStr
+from typing import Optional, Dict, Any
 import jwt
 import bcrypt
+from datetime import datetime, timedelta
 import logging
 import os
-from typing import Optional
-
-# Import database and models with fallback
-try:
-    from ..core.database import get_db
-    from ..models.user import User
-    from ..schemas.auth import UserRegister, UserLogin, Token, UserResponse
-    DB_AVAILABLE = True
-except ImportError:
-    DB_AVAILABLE = False
-    logging.warning("Database models not available, using fallback mode")
+from passlib.context import CryptContext
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Create router
 router = APIRouter()
+
+# Security
 security = HTTPBearer()
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-# JWT Configuration with environment variables (Grok 4\"s recommendation)
-SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-change-in-production-render-deployment")
+# JWT Configuration
+SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-change-in-production")
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
-REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7"))
+ACCESS_TOKEN_EXPIRE_MINUTES = 30
+REFRESH_TOKEN_EXPIRE_DAYS = 7
 
-# Enhanced demo users with more comprehensive data (combining both approaches)
-DEMO_USERS = {
+# Pydantic models
+class UserLogin(BaseModel):
+    email: EmailStr
+    password: str
+
+class UserRegister(BaseModel):
+    email: EmailStr
+    password: str
+    role: Optional[str] = "candidate"
+    full_name: Optional[str] = None
+
+class UserResponse(BaseModel):
+    id: str
+    email: str
+    role: str
+    full_name: Optional[str] = None
+    created_at: datetime
+
+class TokenResponse(BaseModel):
+    access_token: str
+    refresh_token: str
+    token_type: str = "bearer"
+    user: UserResponse
+
+# In-memory user storage (replace with database in production)
+users_db = {
     "admin@recruitai.com": {
         "id": "admin_id",
         "email": "admin@recruitai.com",
-        "hashed_password": bcrypt.hashpw("password123".encode("utf-8"), bcrypt.gensalt()).decode("utf-8"),
-        "full_name": "Admin User",
+        "password_hash": pwd_context.hash("password123"),
         "role": "admin",
-        "created_at": datetime.utcnow(),
-        "is_active": True,
-        "is_verified": True,
-        "last_login": datetime.utcnow(),
-        "permissions": ["all"],
-        "company_name": "RecruitAI Inc."
+        "full_name": "Admin User",
+        "created_at": datetime.utcnow()
     },
     "recruiter@recruitai.com": {
-        "id": "recruiter_id",
+        "id": "recruiter_id", 
         "email": "recruiter@recruitai.com",
-        "hashed_password": bcrypt.hashpw("password123".encode("utf-8"), bcrypt.gensalt()).decode("utf-8"),
-        "full_name": "Recruiter User",
+        "password_hash": pwd_context.hash("password123"),
         "role": "recruiter",
-        "created_at": datetime.utcnow(),
-        "is_active": True,
-        "is_verified": True,
-        "last_login": datetime.utcnow(),
-        "permissions": ["manage_jobs", "view_resumes"],
-        "company_name": "Hiring Solutions Ltd."
+        "full_name": "Recruiter User",
+        "created_at": datetime.utcnow()
     },
     "candidate@recruitai.com": {
         "id": "candidate_id",
-        "email": "candidate@recruitai.com",
-        "hashed_password": bcrypt.hashpw("password123".encode("utf-8"), bcrypt.gensalt()).decode("utf-8"),
-        "full_name": "Candidate User",
+        "email": "candidate@recruitai.com", 
+        "password_hash": pwd_context.hash("password123"),
         "role": "candidate",
-        "created_at": datetime.utcnow(),
-        "is_active": True,
-        "is_verified": True,
-        "last_login": datetime.utcnow(),
-        "permissions": ["upload_resume", "view_jobs"],
-        "company_name": None
+        "full_name": "Candidate User",
+        "created_at": datetime.utcnow()
     }
 }
 
-# Helper function to create JWT tokens
+# Token storage (replace with Redis in production)
+refresh_tokens = {}
+
+# Utility functions
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    """Verify a password against its hash"""
+    return pwd_context.verify(plain_password, hashed_password)
+
+def get_password_hash(password: str) -> str:
+    """Hash a password"""
+    return pwd_context.hash(password)
+
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
+    """Create JWT access token"""
     to_encode = data.copy()
     if expires_delta:
         expire = datetime.utcnow() + expires_delta
     else:
         expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    to_encode.update({"exp": expire.timestamp()})
+    
+    to_encode.update({"exp": expire, "type": "access"})
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
-def create_refresh_token(data: dict, expires_delta: Optional[timedelta] = None):
+def create_refresh_token(data: dict):
+    """Create JWT refresh token"""
     to_encode = data.copy()
-    if expires_delta:
-        expire = datetime.utcnow() + expires_delta
-    else:
-        expire = datetime.utcnow() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
-    to_encode.update({"exp": expire.timestamp()})
+    expire = datetime.utcnow() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+    to_encode.update({"exp": expire, "type": "refresh"})
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
-# Helper function to decode JWT tokens
-def decode_token(token: str):
+def verify_token(token: str, token_type: str = "access"):
+    """Verify JWT token"""
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        if payload.get("type") != token_type:
+            return None
         return payload
     except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token has expired")
-    except jwt.InvalidTokenError:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+        return None
+    except jwt.JWTError:
+        return None
 
-# Dependency to get current user (for protected routes)
-async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security), db: Session = Depends(get_db)):
-    token = credentials.credentials
-    try:
-        payload = decode_token(token)
-        user_email = payload.get("sub")
-        if user_email is None:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Could not validate credentials")
-        
-        if DB_AVAILABLE:
-            user = db.query(User).filter(User.email == user_email).first()
-            if user is None:
-                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
-            return user
-        else:
-            # Fallback to demo users
-            user = DEMO_USERS.get(user_email)
-            if user is None:
-                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found in demo mode")
-            return UserResponse(**user) # Return as Pydantic model
+def get_user_by_email(email: str):
+    """Get user by email"""
+    return users_db.get(email)
 
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error getting current user: {str(e)}")
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Could not validate credentials")
-
-# Authentication endpoints
-@router.post("/register", response_model=Token)
-async def register_user(user_data: UserRegister, db: Session = Depends(get_db)):
-    """Register a new user"""
-    if DB_AVAILABLE:
-        db_user = db.query(User).filter(User.email == user_data.email).first()
-        if db_user:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email already registered")
-
-        hashed_password = bcrypt.hashpw(user_data.password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
-        new_user = User(
-            id=str(uuid.uuid4()),
-            email=user_data.email,
-            hashed_password=hashed_password,
-            full_name=user_data.full_name,
-            role=user_data.role,
-            created_at=datetime.utcnow(),
-            is_active=True,
-            is_verified=True,
-            last_login=datetime.utcnow()
+def create_user(user_data: UserRegister) -> dict:
+    """Create a new user"""
+    if user_data.email in users_db:
+        raise HTTPException(
+            status_code=400,
+            detail="User with this email already exists"
         )
-        db.add(new_user)
-        db.commit()
-        db.refresh(new_user)
+    
+    user_id = f"user_{len(users_db) + 1}_{int(datetime.utcnow().timestamp())}"
+    password_hash = get_password_hash(user_data.password)
+    
+    new_user = {
+        "id": user_id,
+        "email": user_data.email,
+        "password_hash": password_hash,
+        "role": user_data.role,
+        "full_name": user_data.full_name or user_data.email.split("@")[0],
+        "created_at": datetime.utcnow()
+    }
+    
+    users_db[user_data.email] = new_user
+    return new_user
 
-        access_token = create_access_token(data={"sub": new_user.email, "role": new_user.role})
-        refresh_token = create_refresh_token(data={"sub": new_user.email})
-        logger.info(f"User registered: {new_user.email}")
-        return {"access_token": access_token, "refresh_token": refresh_token, "token_type": "bearer", "user": new_user}
-    else:
-        # Fallback registration for demo users
-        if user_data.email in DEMO_USERS:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email already registered in demo mode")
-        
-        new_demo_user = {
-            "id": str(uuid.uuid4()),
-            "email": user_data.email,
-            "hashed_password": bcrypt.hashpw(user_data.password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8"),
-            "full_name": user_data.full_name,
-            "role": user_data.role,
-            "created_at": datetime.utcnow(),
-            "is_active": True,
-            "is_verified": True,
-            "last_login": datetime.utcnow(),
-            "permissions": ["upload_resume", "view_jobs"] if user_data.role == "candidate" else ["view_jobs"]
-        }
-        DEMO_USERS[user_data.email] = new_demo_user
-        
-        access_token = create_access_token(data={"sub": new_demo_user["email"], "role": new_demo_user["role"]})
-        refresh_token = create_refresh_token(data={"sub": new_demo_user["email"]})
-        logger.info(f"Demo user registered: {new_demo_user["email"]}")
-        return {"access_token": access_token, "refresh_token": refresh_token, "token_type": "bearer", "user": UserResponse(**new_demo_user)}
-
-@router.post("/login", response_model=Token)
-async def login_for_access_token(user_data: UserLogin, db: Session = Depends(get_db)):
-    """Authenticate user and return JWT token"""
-    user = None
-    if DB_AVAILABLE:
-        user = db.query(User).filter(User.email == user_data.email).first()
-        if not user or not bcrypt.checkpw(user_data.password.encode("utf-8"), user.hashed_password.encode("utf-8")):
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect email or password")
-        user.last_login = datetime.utcnow()
-        db.commit()
-        db.refresh(user)
-    else:
-        # Fallback login for demo users
-        demo_user_data = DEMO_USERS.get(user_data.email)
-        if not demo_user_data or not bcrypt.checkpw(user_data.password.encode("utf-8"), demo_user_data["hashed_password"].encode("utf-8")):
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect email or password in demo mode")
-        user = UserResponse(**demo_user_data)
-        DEMO_USERS[user_data.email]["last_login"] = datetime.utcnow() # Update last login for demo user
-
-    access_token = create_access_token(data={"sub": user.email, "role": user.role})
-    refresh_token = create_refresh_token(data={"sub": user.email})
-    logger.info(f"User logged in: {user.email}")
-    return {"access_token": access_token, "refresh_token": refresh_token, "token_type": "bearer", "user": user}
-
-@router.post("/refresh", response_model=Token)
-async def refresh_access_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    """Refresh access token using refresh token"""
-    refresh_token = credentials.credentials
-    try:
-        payload = decode_token(refresh_token)
-        user_email = payload.get("sub")
-        user_role = payload.get("role") # Assuming role is also in refresh token payload
-        if user_email is None:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token")
-        
-        new_access_token = create_access_token(data={"sub": user_email, "role": user_role})
-        logger.info(f"Token refreshed for user: {user_email}")
-        return {"access_token": new_access_token, "refresh_token": refresh_token, "token_type": "bearer"}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Refresh token error: {str(e)}")
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token")
-
-@router.get("/me", response_model=UserResponse)
-async def read_users_me(current_user: UserResponse = Depends(get_current_user)):
+async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
     """Get current authenticated user"""
-    logger.info(f"Fetching current user: {current_user.email}")
-    return current_user
+    token = credentials.credentials
+    payload = verify_token(token, "access")
+    
+    if payload is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    email = payload.get("sub")
+    if email is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token payload",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    user = get_user_by_email(email)
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    return user
 
-@router.post("/logout")
-async def logout_user(current_user: UserResponse = Depends(get_current_user)):
-    """Logout user (client-side token invalidation)"""
-    logger.info(f"User logged out: {current_user.email}")
-    return {"message": "Logged out successfully"}
-
-@router.post("/change-password")
-async def change_password(current_user: UserResponse = Depends(get_current_user), 
-                          old_password: str = Form(...), 
-                          new_password: str = Form(...),
-                          db: Session = Depends(get_db)):
-    """Change user password"""
+# Routes
+@router.post("/login", response_model=TokenResponse)
+async def login(user_credentials: UserLogin):
+    """Authenticate user and return tokens"""
     try:
-        if DB_AVAILABLE:
-            user = db.query(User).filter(User.id == current_user.id).first()
-            if not user or not bcrypt.checkpw(old_password.encode("utf-8"), user.hashed_password.encode("utf-8")):
-                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect old password")
-            
-            user.hashed_password = bcrypt.hashpw(new_password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
-            db.commit()
-            db.refresh(user)
-            logger.info(f"Password changed for user: {current_user.email}")
-            return {"message": "Password changed successfully"}
+        user = get_user_by_email(user_credentials.email)
         
-        return {"message": "Password change not available in demo mode"}
+        if not user or not verify_password(user_credentials.password, user["password_hash"]):
+            logger.warning(f"Failed login attempt for email: {user_credentials.email}")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Incorrect email or password"
+            )
+        
+        # Create tokens
+        access_token = create_access_token(data={"sub": user["email"]})
+        refresh_token = create_refresh_token(data={"sub": user["email"]})
+        
+        # Store refresh token
+        refresh_tokens[refresh_token] = {
+            "user_email": user["email"],
+            "created_at": datetime.utcnow()
+        }
+        
+        # Create user response
+        user_response = UserResponse(
+            id=user["id"],
+            email=user["email"],
+            role=user["role"],
+            full_name=user["full_name"],
+            created_at=user["created_at"]
+        )
+        
+        logger.info(f"Successful login for user: {user['email']}")
+        
+        return TokenResponse(
+            access_token=access_token,
+            refresh_token=refresh_token,
+            user=user_response
+        )
         
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Change password error: {str(e)}")
+        logger.error(f"Login error: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Internal server error"
+            detail="Internal server error during login"
         )
 
-# Health check endpoint
+@router.post("/register", response_model=TokenResponse)
+async def register(user_data: UserRegister):
+    """Register a new user"""
+    try:
+        # Create user
+        new_user = create_user(user_data)
+        
+        # Create tokens
+        access_token = create_access_token(data={"sub": new_user["email"]})
+        refresh_token = create_refresh_token(data={"sub": new_user["email"]})
+        
+        # Store refresh token
+        refresh_tokens[refresh_token] = {
+            "user_email": new_user["email"],
+            "created_at": datetime.utcnow()
+        }
+        
+        # Create user response
+        user_response = UserResponse(
+            id=new_user["id"],
+            email=new_user["email"],
+            role=new_user["role"],
+            full_name=new_user["full_name"],
+            created_at=new_user["created_at"]
+        )
+        
+        # Fixed the f-string syntax error here
+        logger.info(f"New user registered: {new_user['email']}")
+        
+        return TokenResponse(
+            access_token=access_token,
+            refresh_token=refresh_token,
+            user=user_response
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Registration error: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error during registration"
+        )
+
+@router.get("/me", response_model=UserResponse)
+async def get_current_user_info(current_user: dict = Depends(get_current_user)):
+    """Get current user information"""
+    return UserResponse(
+        id=current_user["id"],
+        email=current_user["email"],
+        role=current_user["role"],
+        full_name=current_user["full_name"],
+        created_at=current_user["created_at"]
+    )
+
+@router.post("/refresh")
+async def refresh_access_token(refresh_token: str):
+    """Refresh access token using refresh token"""
+    try:
+        # Verify refresh token
+        payload = verify_token(refresh_token, "refresh")
+        if payload is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid or expired refresh token"
+            )
+        
+        # Check if refresh token exists in storage
+        if refresh_token not in refresh_tokens:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Refresh token not found"
+            )
+        
+        email = payload.get("sub")
+        user = get_user_by_email(email)
+        
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="User not found"
+            )
+        
+        # Create new access token
+        new_access_token = create_access_token(data={"sub": email})
+        
+        logger.info(f"Access token refreshed for user: {email}")
+        
+        return {
+            "access_token": new_access_token,
+            "token_type": "bearer"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Token refresh error: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error during token refresh"
+        )
+
+@router.post("/logout")
+async def logout(
+    refresh_token: Optional[str] = None,
+    current_user: dict = Depends(get_current_user)
+):
+    """Logout user and invalidate refresh token"""
+    try:
+        if refresh_token and refresh_token in refresh_tokens:
+            del refresh_tokens[refresh_token]
+        
+        logger.info(f"User logged out: {current_user['email']}")
+        
+        return {"message": "Successfully logged out"}
+        
+    except Exception as e:
+        logger.error(f"Logout error: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error during logout"
+        )
+
 @router.get("/health")
 async def auth_health():
-    """Authentication service health check with enhanced information"""
+    """Authentication service health check"""
     return {
         "status": "healthy",
         "service": "authentication",
-        "version": "2.0.0",
-        "database_available": DB_AVAILABLE,
-        "demo_users_available": len(DEMO_USERS),
+        "timestamp": datetime.utcnow().isoformat(),
+        "users_count": len(users_db),
+        "active_tokens": len(refresh_tokens),
         "features": [
-            "JWT authentication",
-            "Refresh tokens",
-            "Password hashing (bcrypt)",
-            "Demo credentials",
-            "User registration",
-            "Password reset",
-            "Environment configuration",
-            "Graceful fallbacks"
-        ],
-        "demo_credentials": {
-            "admin": "admin@recruitai.com / password123",
-            "recruiter": "recruiter@recruitai.com / password123",
-            "candidate": "candidate@recruitai.com / password123"
-        },
-        "token_config": {
-            "access_token_expire_minutes": ACCESS_TOKEN_EXPIRE_MINUTES,
-            "refresh_token_expire_days": REFRESH_TOKEN_EXPIRE_DAYS,
-            "algorithm": ALGORITHM
-        }
+            "JWT Authentication",
+            "Password Hashing",
+            "Token Refresh",
+            "Role-based Access"
+        ]
     }
+
+@router.get("/demo-users")
+async def get_demo_users():
+    """Get demo user credentials for testing"""
+    demo_users = []
+    for email, user_data in users_db.items():
+        if email in ["admin@recruitai.com", "recruiter@recruitai.com", "candidate@recruitai.com"]:
+            demo_users.append({
+                "email": email,
+                "password": "password123",
+                "role": user_data["role"],
+                "description": f"{user_data['role'].title()} access level"
+            })
+    
+    return {
+        "demo_users": demo_users,
+        "note": "These are demo credentials for testing purposes"
+    }
+
