@@ -1,3 +1,6 @@
+
+
+
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
@@ -44,210 +47,202 @@ class JobResponse(BaseModel):
     experience_level: str
     skills_required: List[str]
     department: Optional[str]
-    status: str
-    created_at: str
-    updated_at: str
+    created_at: datetime
+    updated_at: datetime
     created_by: str
     applications_count: int
+    views_count: int
+    status: str
 
-# Mock database
+# In-memory storage for demo/fallback mode
 mock_jobs = [
     {
-        "id": "job_001",
-        "title": "Senior Python Developer",
-        "description": "We are looking for an experienced Python developer to join our team.",
-        "requirements": ["5+ years Python experience", "FastAPI knowledge", "Database design"],
+        "id": "job1",
+        "title": "Senior Software Engineer",
+        "description": "We are looking for a passionate Senior Software Engineer to join our team. You will be responsible for developing and maintaining high-quality software solutions.",
+        "requirements": ["5+ years experience", "Strong Python skills", "Experience with FastAPI"],
         "location": "Remote",
-        "salary_range": "$80,000 - $120,000",
+        "salary_range": "$120,000 - $150,000",
         "employment_type": "Full-time",
         "experience_level": "Senior",
-        "skills_required": ["Python", "FastAPI", "PostgreSQL", "Docker"],
+        "skills_required": ["Python", "FastAPI", "SQLAlchemy", "Docker", "AWS"],
         "department": "Engineering",
-        "status": "active",
-        "created_at": "2024-01-01T00:00:00Z",
-        "updated_at": "2024-01-01T00:00:00Z",
-        "created_by": "admin@recruitai.com",
-        "applications_count": 15
+        "created_at": datetime.fromisoformat("2024-01-01T10:00:00Z"),
+        "updated_at": datetime.fromisoformat("2024-01-01T10:00:00Z"),
+        "created_by": "admin_id",
+        "applications_count": 15,
+        "views_count": 120,
+        "status": "active"
     },
     {
-        "id": "job_002",
-        "title": "Frontend React Developer",
-        "description": "Join our frontend team to build amazing user interfaces.",
-        "requirements": ["3+ years React experience", "TypeScript knowledge", "UI/UX understanding"],
+        "id": "job2",
+        "title": "Frontend Developer",
+        "description": "Join our dynamic team as a Frontend Developer and build amazing user interfaces using modern web technologies.",
+        "requirements": ["3+ years experience", "Proficiency in React", "HTML, CSS, JavaScript"],
         "location": "New York, NY",
-        "salary_range": "$70,000 - $100,000",
+        "salary_range": "$90,000 - $110,000",
         "employment_type": "Full-time",
         "experience_level": "Mid-level",
-        "skills_required": ["React", "TypeScript", "CSS", "JavaScript"],
+        "skills_required": ["React", "JavaScript", "HTML", "CSS", "TypeScript", "Redux"],
         "department": "Engineering",
-        "status": "active",
-        "created_at": "2024-01-02T00:00:00Z",
-        "updated_at": "2024-01-02T00:00:00Z",
-        "created_by": "admin@recruitai.com",
-        "applications_count": 23
+        "created_at": datetime.fromisoformat("2024-01-05T11:30:00Z"),
+        "updated_at": datetime.fromisoformat("2024-01-05T11:30:00Z"),
+        "created_by": "recruiter_id",
+        "applications_count": 20,
+        "views_count": 150,
+        "status": "active"
+    },
+    {
+        "id": "job3",
+        "title": "DevOps Engineer",
+        "description": "We need an experienced DevOps Engineer to streamline our development and operations processes.",
+        "requirements": ["4+ years experience", "Kubernetes, Docker", "CI/CD pipelines"],
+        "location": "San Francisco, CA",
+        "salary_range": "$130,000 - $160,000",
+        "employment_type": "Full-time",
+        "experience_level": "Senior",
+        "skills_required": ["Docker", "Kubernetes", "AWS", "Azure", "CI/CD", "Ansible", "Terraform"],
+        "department": "Operations",
+        "created_at": datetime.fromisoformat("2024-01-10T09:00:00Z"),
+        "updated_at": datetime.fromisoformat("2024-01-10T09:00:00Z"),
+        "created_by": "admin_id",
+        "applications_count": 12,
+        "views_count": 90,
+        "status": "active"
+    },
+    {
+        "id": "job4",
+        "title": "Data Scientist",
+        "description": "As a Data Scientist, you will be responsible for analyzing large datasets and building predictive models.",
+        "requirements": ["PhD or Master's in a quantitative field", "Strong Python/R skills", "Machine Learning"],
+        "location": "Boston, MA",
+        "salary_range": "$110,000 - $140,000",
+        "employment_type": "Full-time",
+        "experience_level": "Mid-level",
+        "skills_required": ["Python", "R", "Machine Learning", "SQL", "Pandas", "NumPy", "Scikit-learn"],
+        "department": "Data Science",
+        "created_at": datetime.fromisoformat("2024-01-15T14:00:00Z"),
+        "updated_at": datetime.fromisoformat("2024-01-15T14:00:00Z"),
+        "created_by": "recruiter_id",
+        "applications_count": 8,
+        "views_count": 70,
+        "status": "closed"
+    },
+    {
+        "id": "job5",
+        "title": "UI/UX Designer",
+        "description": "Create intuitive and visually appealing user interfaces for our web and mobile applications.",
+        "requirements": ["2+ years experience", "Proficiency in Figma, Sketch, Adobe XD", "User-centered design"],
+        "location": "Remote",
+        "salary_range": "$80,000 - $100,000",
+        "employment_type": "Full-time",
+        "experience_level": "Junior",
+        "skills_required": ["Figma", "Sketch", "Adobe XD", "User Research", "Prototyping", "Wireframing"],
+        "department": "Design",
+        "created_at": datetime.fromisoformat("2024-01-20T16:00:00Z"),
+        "updated_at": datetime.fromisoformat("2024-01-20T16:00:00Z"),
+        "created_by": "admin_id",
+        "applications_count": 18,
+        "views_count": 110,
+        "status": "active"
     }
 ]
 
-# Helper functions
-def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    # Simple token validation - in production, use proper JWT validation
-    if not credentials or not credentials.credentials:
-        raise HTTPException(status_code=401, detail="Authentication required")
-    return {"email": "admin@recruitai.com", "id": "user_001"}
+# Helper function to get current user (mock for now)
+async def get_current_user():
+    # In a real application, this would validate a token and return user info
+    return {"id": "mock_user", "email": "mock@example.com", "role": "admin"}
 
-def generate_job_id():
-    return f"job_{uuid.uuid4().hex[:8]}"
+@router.post("/", response_model=JobResponse)
+async def create_job(job: JobCreate, current_user: dict = Depends(get_current_user)):
+    """Create a new job posting"""
+    new_job = job.dict()
+    new_job["id"] = str(uuid.uuid4())
+    new_job["created_at"] = datetime.utcnow()
+    new_job["updated_at"] = datetime.utcnow()
+    new_job["created_by"] = current_user["id"]
+    new_job["applications_count"] = 0
+    new_job["views_count"] = 0
+    new_job["status"] = "active"
+    mock_jobs.append(new_job)
+    return new_job
 
-# Job endpoints
-@router.get("/jobs", response_model=List[JobResponse])
-async def get_jobs(
-    skip: int = 0,
-    limit: int = 100,
-    status: Optional[str] = None,
-    department: Optional[str] = None,
-    current_user: dict = Depends(get_current_user)
-):
-    \"\"\"Get all jobs with optional filtering\"\"\"
-    try:
-        jobs = mock_jobs.copy()
-        
-        # Apply filters
-        if status:
-            jobs = [job for job in jobs if job["status"] == status]
-        if department:
-            jobs = [job for job in jobs if job.get("department") == department]
-        
-        # Apply pagination
-        jobs = jobs[skip:skip + limit]
-        
-        return jobs
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching jobs: {str(e)}")
+@router.get("/", response_model=List[JobResponse])
+async def get_all_jobs(current_user: dict = Depends(get_current_user)):
+    """Retrieve all job postings"""
+    return mock_jobs
 
-@router.get("/jobs/{job_id}", response_model=JobResponse)
-async def get_job(job_id: str, current_user: dict = Depends(get_current_user)):
-    \"\"\"Get a specific job by ID\"\"\"
-    try:
-        job = next((job for job in mock_jobs if job["id"] == job_id), None)
-        if not job:
-            raise HTTPException(status_code=404, detail="Job not found")
-        return job
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching job: {str(e)}")
+@router.get("/{job_id}", response_model=JobResponse)
+async def get_job_by_id(job_id: str, current_user: dict = Depends(get_current_user)):
+    """Retrieve a single job posting by ID"""
+    job = next((job for job in mock_jobs if job["id"] == job_id), None)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
 
-@router.post("/jobs", response_model=JobResponse)
-async def create_job(job_data: JobCreate, current_user: dict = Depends(get_current_user)):
-    \"\"\"Create a new job posting\"\"\"
-    try:
-        job_id = generate_job_id()
-        current_time = datetime.utcnow().isoformat() + "Z"
-        
-        new_job = {
-            "id": job_id,
-            "title": job_data.title,
-            "description": job_data.description,
-            "requirements": job_data.requirements,
-            "location": job_data.location,
-            "salary_range": job_data.salary_range,
-            "employment_type": job_data.employment_type,
-            "experience_level": job_data.experience_level,
-            "skills_required": job_data.skills_required,
-            "department": job_data.department,
-            "status": "active",
-            "created_at": current_time,
-            "updated_at": current_time,
-            "created_by": current_user["email"],
-            "applications_count": 0
-        }
-        
-        mock_jobs.append(new_job)
-        
-        return new_job
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error creating job: {str(e)}")
+@router.put("/{job_id}", response_model=JobResponse)
+async def update_job(job_id: str, job_update: JobUpdate, current_user: dict = Depends(get_current_user)):
+    """Update an existing job posting"""
+    job_index = next((i for i, job in enumerate(mock_jobs) if job["id"] == job_id), None)
+    if job_index is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    current_job = mock_jobs[job_index]
+    updated_data = job_update.dict(exclude_unset=True)
+    for key, value in updated_data.items():
+        if key == "skills_required" and isinstance(value, str):
+            current_job[key] = [s.strip() for s in value.split(",")]
+        else:
+            current_job[key] = value
+    current_job["updated_at"] = datetime.utcnow()
+    mock_jobs[job_index] = current_job
+    return current_job
 
-@router.put("/jobs/{job_id}", response_model=JobResponse)
-async def update_job(
-    job_id: str, 
-    job_data: JobUpdate, 
-    current_user: dict = Depends(get_current_user)
-):
-    \"\"\"Update an existing job\"\"\"
-    try:
-        job_index = next((i for i, job in enumerate(mock_jobs) if job["id"] == job_id), None)
-        if job_index is None:
-            raise HTTPException(status_code=404, detail="Job not found")
-        
-        job = mock_jobs[job_index]
-        
-        # Update fields
-        update_data = job_data.dict(exclude_unset=True)
-        for field, value in update_data.items():
-            if value is not None:
-                job[field] = value
-        
-        job["updated_at"] = datetime.utcnow().isoformat() + "Z"
-        mock_jobs[job_index] = job
-        
-        return job
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error updating job: {str(e)}")
-
-@router.delete("/jobs/{job_id}")
+@router.delete("/{job_id}")
 async def delete_job(job_id: str, current_user: dict = Depends(get_current_user)):
-    \"\"\"Delete a job posting\"\"\"
-    try:
-        job_index = next((i for i, job in enumerate(mock_jobs) if job["id"] == job_id), None)
-        if job_index is None:
-            raise HTTPException(status_code=404, detail="Job not found")
-        
-        deleted_job = mock_jobs.pop(job_index)
-        
-        return {
-            "success": True,
-            "message": f"Job \\'{deleted_job[\"title\"]}\\' deleted successfully",
-            "deleted_job_id": job_id
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error deleting job: {str(e)}")
+    """Delete a job posting"""
+    global mock_jobs
+    initial_len = len(mock_jobs)
+    mock_jobs = [job for job in mock_jobs if job["id"] != job_id]
+    if len(mock_jobs) == initial_len:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"message": "Job deleted successfully"}
 
-@router.get("/jobs/{job_id}/applications")
+@router.get("/{job_id}/applications")
 async def get_job_applications(job_id: str, current_user: dict = Depends(get_current_user)):
-    \"\"\"Get applications for a specific job\"\"\"
+    """Get applications for a specific job (mock data)"""
+    job = next((job for job in mock_jobs if job["id"] == job_id), None)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
     try:
-        job = next((job for job in mock_jobs if job["id"] == job_id), None)
-        if not job:
-            raise HTTPException(status_code=404, detail="Job not found")
-        
-        # Mock applications data
         applications = [
             {
-                "id": "app_001",
-                "candidate_name": "John Doe",
-                "email": "john.doe@email.com",
-                "phone": "+1-555-0123",
-                "resume_url": "/resumes/john_doe_resume.pdf",
-                "cover_letter": "I am very interested in this position...",
-                "match_score": 85,
-                "status": "under_review",
-                "applied_at": "2024-01-03T10:30:00Z"
+                "id": "app1",
+                "resume_id": "resume1",
+                "candidate_name": "Alice Smith",
+                "status": "pending",
+                "applied_at": "2024-01-01T12:00:00Z",
+                "match_score": 92,
+                "cover_letter": "I am highly interested in this position..."
             },
             {
-                "id": "app_002",
-                "candidate_name": "Jane Smith",
-                "email": "jane.smith@email.com",
-                "phone": "+1-555-0124",
-                "resume_url": "/resumes/jane_smith_resume.pdf",
-                "cover_letter": "With my 5 years of experience...",
-                "match_score": 92,
+                "id": "app2",
+                "resume_id": "resume2",
+                "candidate_name": "Bob Johnson",
+                "status": "reviewed",
+                "applied_at": "2024-01-02T10:30:00Z",
+                "match_score": 88,
+                "cover_letter": "My experience aligns perfectly..."
+            },
+            {
+                "id": "app3",
+                "resume_id": "resume3",
+                "candidate_name": "Charlie Brown",
                 "status": "interview_scheduled",
-                "applied_at": "2024-01-04T14:15:00Z"
+                "applied_at": "2024-01-04T14:15:00Z",
+                "match_score": 95,
+                "cover_letter": "With my 5 years of experience..."
             }
         ]
         
@@ -264,7 +259,7 @@ async def get_job_applications(job_id: str, current_user: dict = Depends(get_cur
 
 @router.get("/dashboard/stats")
 async def get_dashboard_stats(current_user: dict = Depends(get_current_user)):
-    \"\"\"Get dashboard statistics\"\"\"
+    """Get dashboard statistics"""
     try:
         total_jobs = len(mock_jobs)
         active_jobs = len([job for job in mock_jobs if job["status"] == "active"])
@@ -283,4 +278,3 @@ async def get_dashboard_stats(current_user: dict = Depends(get_current_user)):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching dashboard stats: {str(e)}")
-
