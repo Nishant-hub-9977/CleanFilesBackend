@@ -1,48 +1,42 @@
+import os
+import logging
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from pydantic import BaseModel
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from sqlalchemy import Column, Integer, String, select
-import logging
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..db import get_db, Base, AsyncSession  # Fixed import from db.py
+from ..db import get_db, Base
+from ..schemas.auth import UserRegister, UserLogin, Token, TokenData, PasswordReset, PasswordResetConfirm, ChangePassword  # Import and use schemas
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 logger = logging.getLogger(__name__)
 
-SECRET_KEY = "your-secret-key"
+SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key")  # Env-safe
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
+REFRESH_TOKEN_EXPIRE_DAYS = 7
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
 
 class UserDB(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True, index=True)
+    username = Column(String, unique=True, index=True)  # Added from schema
     email = Column(String, unique=True, index=True)
     hashed_password = Column(String)
-    role = Column(String, default="candidate")
+    company_name = Column(String)  # Added
+    phone_number = Column(String, nullable=True)  # Added
+    role = Column(String, default="user")  # Aligned
 
-class Token(BaseModel):
-    access_token: str
-    token_type: str
-
-class TokenData(BaseModel):
-    email: Optional[str] = None
-    role: Optional[str] = None
-
-class User(BaseModel):
-    email: str
-    role: str
-
-class UserCreate(BaseModel):
-    email: str
-    password: str
-    role: Optional[str] = "candidate"
+async def get_user(db: AsyncSession, identifier: str):  # username or email
+    query = select(UserDB).where((UserDB.email == identifier) | (UserDB.username == identifier))
+    result = await db.execute(query)
+    return result.scalar_one_or_none()
 
 def verify_password(plain_password, hashed_password):
     return pwd_context.verify(plain_password, hashed_password)
@@ -50,20 +44,9 @@ def verify_password(plain_password, hashed_password):
 def get_password_hash(password):
     return pwd_context.hash(password)
 
-async def get_user(db: AsyncSession, email: str):
-    query = select(UserDB).where(UserDB.email == email)
-    result = await db.execute(query)
-    return result.scalar_one_or_none()
-
-async def authenticate_user(db: AsyncSession, email: str, password: str):
-    user = await get_user(db, email)
-    if not user or not verify_password(password, user.hashed_password):
-        return False
-    return user
-
-def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
+def create_token(data: dict, expires_delta: timedelta):
     to_encode = data.copy()
-    expire = datetime.now(timezone.utc) + (expires_delta or timedelta(minutes=15))
+    expire = datetime.now(timezone.utc) + expires_delta
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
@@ -75,50 +58,86 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: AsyncSession
     )
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        email: str = payload.get("sub")
-        if email is None:
+        identifier: str = payload.get("sub")
+        if identifier is None:
             raise credentials_exception
-        token_data = TokenData(email=email, role=payload.get("role"))
+        token_data = TokenData(user_id=payload.get("user_id"))
     except JWTError:
         raise credentials_exception
-    user = await get_user(db, token_data.email)
+    user = await get_user(db, identifier)
     if user is None:
         raise credentials_exception
     return user
 
 @router.post("/login", response_model=Token)
-async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db: AsyncSession = Depends(get_db)):
-    user = await authenticate_user(db, form_data.username, form_data.password)
-    if not user:
-        logger.warning(f"Failed login for {form_data.username}")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect email or password",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = create_access_token(
-        data={"sub": user.email, "role": user.role}, expires_delta=access_token_expires
-    )
+async def login_for_access_token(form_data: UserLogin = Depends(), db: AsyncSession = Depends(get_db)):  # Use schema
+    user = await get_user(db, form_data.username_or_email)
+    if not user or not verify_password(form_data.password, user.hashed_password):
+        logger.warning(f"Failed login for {form_data.username_or_email}")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect credentials")
+    access_token = create_token({"sub": user.email, "user_id": user.id}, timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+    refresh_token = create_token({"sub": user.email, "user_id": user.id}, timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS))
     logger.info(f"Successful login for {user.email}")
-    return {"access_token": access_token, "token_type": "bearer"}
+    return {"access_token": access_token, "refresh_token": refresh_token, "token_type": "bearer"}
 
 @router.post("/register", response_model=Token)
-async def register_user(user_create: UserCreate, db: AsyncSession = Depends(get_db)):
-    existing_user = await get_user(db, user_create.email)
+async def register_user(user_data: UserRegister, db: AsyncSession = Depends(get_db)):  # Use schema (auto-validates)
+    existing_user = await get_user(db, user_data.email) or await get_user(db, user_data.username)
     if existing_user:
-        raise HTTPException(status_code=400, detail="Email already registered")
-    hashed_password = get_password_hash(user_create.password)
-    new_user = UserDB(email=user_create.email, hashed_password=hashed_password, role=user_create.role)
+        raise HTTPException(status_code=400, detail="Email or username already registered")
+    hashed_password = get_password_hash(user_data.password)
+    new_user = UserDB(
+        username=user_data.username,
+        email=user_data.email,
+        hashed_password=hashed_password,
+        company_name=user_data.company_name,
+        phone_number=user_data.phone_number,
+        role=user_data.role
+    )
     db.add(new_user)
     await db.commit()
     await db.refresh(new_user)
-    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = create_access_token(
-        data={"sub": new_user.email, "role": new_user.role}, expires_delta=access_token_expires
-    )
-    logger.info(f"New user registered: {user_create.email}")
-    return {"access_token": access_token, "token_type": "bearer"}
+    access_token = create_token({"sub": new_user.email, "user_id": new_user.id}, timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+    refresh_token = create_token({"sub": new_user.email, "user_id": new_user.id}, timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS))
+    logger.info(f"New user registered: {user_data.email}")
+    return {"access_token": access_token, "refresh_token": refresh_token, "token_type": "bearer"}
+
+@router.post("/password-reset")
+async def password_reset(reset_data: PasswordReset, db: AsyncSession = Depends(get_db)):  # New from schema
+    user = await get_user(db, reset_data.email)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    reset_token = create_token({"sub": user.email, "scope": "reset", "user_id": user.id}, timedelta(minutes=30))
+    logger.info(f"Password reset requested for {reset_data.email}")
+    return {"message": "Reset token sent", "token": reset_token}  # In prod, email token instead
+
+@router.post("/password-reset-confirm")
+async def password_reset_confirm(confirm_data: PasswordResetConfirm, db: AsyncSession = Depends(get_db)):  # New from schema
+    try:
+        payload = jwt.decode(confirm_data.token, SECRET_KEY, algorithms=[ALGORITHM])
+        if payload.get("scope") != "reset":
+            raise JWTError
+        email = payload.get("sub")
+    except JWTError:
+        raise HTTPException(status_code=400, detail="Invalid or expired token")
+    user = await get_user(db, email)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    hashed_password = get_password_hash(confirm_data.new_password)
+    user.hashed_password = hashed_password
+    await db.commit()
+    logger.info(f"Password reset for {email}")
+    return {"message": "Password reset successful"}
+
+@router.post("/change-password")
+async def change_password(change_data: ChangePassword, current_user: UserDB = Depends(get_current_user), db: AsyncSession = Depends(get_db)):  # New from schema
+    if not verify_password(change_data.current_password, current_user.hashed_password):
+        raise HTTPException(status_code=400, detail="Incorrect current password")
+    hashed_password = get_password_hash(change_data.new_password)
+    current_user.hashed_password = hashed_password
+    await db.commit()
+    logger.info(f"Password changed for {current_user.email}")
+    return {"message": "Password changed successfully"}
 
 @router.get("/me", response_model=User)
 async def read_users_me(current_user: UserDB = Depends(get_current_user)):
