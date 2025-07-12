@@ -26,7 +26,7 @@ router = APIRouter()
 security = HTTPBearer()
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
 
-# JWT Configuration with environment variables (Grok 4's recommendation)
+# JWT Configuration with environment variables (Grok 4\"s recommendation)
 SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-change-in-production-render-deployment")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
@@ -70,18 +70,18 @@ DEMO_USERS = {
 }
 
 def hash_password(password: str) -> str:
-    """Hash password using bcrypt (production-grade)"""
-    return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+    \"\"\"Hash password using bcrypt (production-grade)\"\"\"
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
 def verify_password(password: str, hashed: str) -> bool:
-    """Verify password against hash"""
+    \"\"\"Verify password against hash\"\"\"
     try:
-        return bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
+        return bcrypt.checkpw(password.encode("utf-8"), hashed.encode("utf-8"))
     except Exception:
         return False
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
-    """Create JWT access token with enhanced payload"""
+    \"\"\"Create JWT access token with enhanced payload\"\"\"
     to_encode = data.copy()
     if expires_delta:
         expire = datetime.utcnow() + expires_delta
@@ -97,7 +97,7 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     return encoded_jwt
 
 def create_refresh_token(data: dict) -> str:
-    """Create refresh token (Grok 4's recommendation)"""
+    \"\"\"Create refresh token (Grok 4\"s recommendation)\"\"\"
     to_encode = data.copy()
     expire = datetime.utcnow() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
     to_encode.update({
@@ -108,7 +108,7 @@ def create_refresh_token(data: dict) -> str:
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    """Verify JWT token with enhanced error handling"""
+    \"\"\"Verify JWT token with enhanced error handling\"\"\"
     try:
         payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
         
@@ -145,7 +145,7 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
         )
 
 async def get_user_by_identifier(identifier: str, db: Session = None):
-    """Get user by email or username with fallback to demo users"""
+    \"\"\"Get user by email or username with fallback to demo users\"\"\"
     
     # Check demo users first (always available)
     for email, user_data in DEMO_USERS.items():
@@ -162,11 +162,11 @@ async def get_user_by_identifier(identifier: str, db: Session = None):
                 return {
                     "id": user.id,
                     "email": user.email,
-                    "username": getattr(user, 'username', user.email),
+                    "username": getattr(user, "username", user.email),
                     "password": user.password_hash,
                     "full_name": user.full_name,
-                    "company_name": getattr(user, 'company_name', user.company),
-                    "phone_number": getattr(user, 'phone_number', None),
+                    "company_name": getattr(user, "company_name", user.company),
+                    "phone_number": getattr(user, "phone_number", None),
                     "role": user.role,
                     "created_at": user.created_at
                 }
@@ -177,12 +177,12 @@ async def get_user_by_identifier(identifier: str, db: Session = None):
 
 @router.post("/login", response_model=Token)
 async def login(user_data: UserLogin, db: Session = Depends(get_db) if DB_AVAILABLE else None):
-    """
-    Enhanced login with support for both email and username (Grok 4's schema alignment)
-    """
+    \"\"\"
+    Enhanced login with support for both email and username (Grok 4\"s schema alignment)
+    \"\"\"
     try:
         # Support both email and username_or_email fields
-        identifier = getattr(user_data, 'username_or_email', None) or getattr(user_data, 'email', None)
+        identifier = getattr(user_data, "username_or_email", None) or getattr(user_data, "email", None)
         
         if not identifier:
             raise HTTPException(
@@ -234,7 +234,7 @@ async def login(user_data: UserLogin, db: Session = Depends(get_db) if DB_AVAILA
         
         return {
             "access_token": access_token,
-            "refresh_token": refresh_token,  # Grok 4's recommendation
+            "refresh_token": refresh_token,  # Grok 4\"s recommendation
             "token_type": "bearer",
             "expires_in": ACCESS_TOKEN_EXPIRE_MINUTES * 60,
             "user": {
@@ -258,9 +258,9 @@ async def login(user_data: UserLogin, db: Session = Depends(get_db) if DB_AVAILA
 
 @router.post("/register", response_model=UserResponse if DB_AVAILABLE else dict)
 async def register(user_data: UserRegister, db: Session = Depends(get_db) if DB_AVAILABLE else None):
-    """
-    Enhanced registration with schema validation (Grok 4's approach)
-    """
+    \"\"\"
+    Enhanced registration with schema validation (Grok 4\"s approach)
+    \"\"\"
     try:
         logger.info(f"Registration attempt for: {user_data.email}")
         
@@ -273,7 +273,7 @@ async def register(user_data: UserRegister, db: Session = Depends(get_db) if DB_
             )
         
         # Check username if provided
-        if hasattr(user_data, 'username'):
+        if hasattr(user_data, "username"):
             existing_username = await get_user_by_identifier(user_data.username, db)
             if existing_username:
                 raise HTTPException(
@@ -286,12 +286,12 @@ async def register(user_data: UserRegister, db: Session = Depends(get_db) if DB_
             hashed_password = hash_password(user_data.password)
             new_user = User(
                 email=user_data.email,
-                username=getattr(user_data, 'username', user_data.email),
+                username=getattr(user_data, "username", user_data.email),
                 password_hash=hashed_password,
                 full_name=user_data.full_name,
-                company_name=getattr(user_data, 'company_name', ''),
-                phone_number=getattr(user_data, 'phone_number', None),
-                role=getattr(user_data, 'role', 'candidate'),
+                company_name=getattr(user_data, "company_name", ""),
+                phone_number=getattr(user_data, "phone_number", None),
+                role=getattr(user_data, "role", "candidate"),
                 created_at=datetime.utcnow()
             )
             
@@ -316,7 +316,7 @@ async def register(user_data: UserRegister, db: Session = Depends(get_db) if DB_
             return {
                 "message": "Registration successful (demo mode)",
                 "email": user_data.email,
-                "role": getattr(user_data, 'role', 'candidate')
+                "role": getattr(user_data, "role", "candidate")
             }
         
     except HTTPException:
@@ -330,9 +330,9 @@ async def register(user_data: UserRegister, db: Session = Depends(get_db) if DB_
 
 @router.post("/refresh")
 async def refresh_token(refresh_token: str):
-    """
-    Refresh access token using refresh token (Grok 4's recommendation)
-    """
+    \"\"\"
+    Refresh access token using refresh token (Grok 4\"s recommendation)
+    \"\"\"
     try:
         payload = jwt.decode(refresh_token, SECRET_KEY, algorithms=[ALGORITHM])
         
@@ -370,9 +370,9 @@ async def refresh_token(refresh_token: str):
 
 @router.get("/me")
 async def get_current_user(token_data: dict = Depends(verify_token), db: Session = Depends(get_db) if DB_AVAILABLE else None):
-    """
+    \"\"\"
     Get current user information with enhanced data
-    """
+    \"\"\"
     try:
         email = token_data["email"]
         user = await get_user_by_identifier(email, db)
@@ -405,13 +405,13 @@ async def get_current_user(token_data: dict = Depends(verify_token), db: Session
 
 @router.post("/password-reset")
 async def password_reset(email: str):
-    """
-    Initiate password reset process (Grok 4's implementation)
-    """
+    \"\"\"
+    Initiate password reset process (Grok 4\"s implementation)
+    \"\"\"
     try:
         user = await get_user_by_identifier(email)
         if not user:
-            # Don't reveal if user exists or not for security
+            # Don\"t reveal if user exists or not for security
             logger.info(f"Password reset requested for non-existent user: {email}")
         else:
             logger.info(f"Password reset requested for: {email}")
@@ -433,9 +433,9 @@ async def change_password(
     token_data: dict = Depends(verify_token),
     db: Session = Depends(get_db) if DB_AVAILABLE else None
 ):
-    """
-    Change user password (Grok 4's implementation)
-    """
+    \"\"\"
+    Change user password (Grok 4\"s implementation)
+    \"\"\"
     try:
         email = token_data["email"]
         user = await get_user_by_identifier(email, db)
@@ -450,7 +450,7 @@ async def change_password(
         stored_password = user.get("password", user.get("hashed_password", ""))
         
         if email in [u["email"] for u in DEMO_USERS.values()]:
-            # Demo user - don't allow password change
+            # Demo user - don\"t allow password change
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Cannot change password for demo users"
@@ -485,9 +485,7 @@ async def change_password(
 # Health check endpoint
 @router.get("/health")
 async def auth_health():
-    """
-    Authentication service health check with enhanced information
-    """
+    \"\"\"Authentication service health check with enhanced information\"\"\"
     return {
         "status": "healthy",
         "service": "authentication",
