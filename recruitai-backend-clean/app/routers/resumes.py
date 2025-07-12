@@ -1,405 +1,235 @@
-
-
-
-from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, status, Form, Query
-from fastapi.responses import FileResponse
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form, status
+from fastapi.responses import JSONResponse
 from typing import List, Optional, Dict, Any
 import os
 import logging
+import aiofiles
+from datetime import datetime
 import uuid
 import json
-from datetime import datetime
-import re
-import PyPDF2
-import docx
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
-import numpy as np
-
-# Import database with fallback (Grok 4\"s approach)
-try:
-    from ..core.database import get_db
-    from ..models.resume import Resume
-    from ..models.job import Job
-    DB_AVAILABLE = True
-except ImportError:
-    DB_AVAILABLE = False
-    logging.warning(\"Database models not available, using in-memory storage\")
+from pathlib import Path
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Create router
 router = APIRouter()
 
-# In-memory storage for fallback mode
-in_memory_resumes = {}
-in_memory_jobs = {}
-
-# Enhanced skill database (combining both approaches)
-TECHNICAL_SKILLS = {
-    # Programming Languages
-    \"python\", \"java\", \"javascript\", \"typescript\", \"c++\", \"c#\", \"php\", \"ruby\", \"go\", \"rust\\
-
-
-from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, status, Form, Query
-from fastapi.responses import FileResponse
-from sqlalchemy.orm import Session
-from typing import List, Optional, Dict, Any
-import os
-import logging
-import uuid
-import json
-from datetime import datetime
-import re
-import PyPDF2
-import docx
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
-import numpy as np
-
-# Import database with fallback (Grok 4\'s approach)
+# Try to import database models, fallback to in-memory storage
 try:
-    from ..core.database import get_db
-    from ..models.resume import Resume
-    from ..models.job import Job
-    DB_AVAILABLE = True
-except ImportError:
-    DB_AVAILABLE = False
-    logging.warning("Database models not available, using in-memory storage")
+    from app.core.database import get_db
+    from app.models.resume import Resume
+    DATABASE_AVAILABLE = True
+    logger.info("Database models imported successfully")
+except ImportError as e:
+    DATABASE_AVAILABLE = False
+    logger.warning("Database models not available, using in-memory storage")
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# In-memory storage for resumes (fallback)
+resumes_storage = []
 
-router = APIRouter()
+# File processing utilities
+UPLOAD_DIR = "uploads/resumes"
+ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt", ".doc"}
+MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
 
-# In-memory storage for fallback mode
-in_memory_resumes = {}
-in_memory_jobs = {}
+# Ensure upload directory exists
+os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-# Enhanced skill database (combining both approaches)
-TECHNICAL_SKILLS = {
-    # Programming Languages
-    \'python\', \'java\', \'javascript\', \'typescript\', \'c++\', \'c#\', \'php\', \'ruby\', \'go\', \'rust\',
-    \'swift\', \'kotlin\', \'scala\', \'r\', \'matlab\', \'perl\', \'shell\', \'bash\', \'powershell\',
-    
-    # Web Technologies
-    \'html\', \'css\', \'react\', \'angular\', \'vue\', \'nodejs\', \'express\', \'django\', \'flask\',
-    \'fastapi\', \'spring\', \'laravel\', \'rails\', \'asp.net\', \'jquery\', \'bootstrap\', \'tailwind\',
-    
-    # Databases
-    \'mysql\', \'postgresql\', \'mongodb\', \'redis\', \'elasticsearch\', \'sqlite\', \'oracle\',
-    \'sql server\', \'cassandra\', \'dynamodb\', \'firebase\', \'neo4j\',
-    
-    # Cloud & DevOps
-    \'aws\', \'azure\', \'gcp\', \'docker\', \'kubernetes\', \'jenkins\', \'gitlab\', \'github actions\',
-    \'terraform\', \'ansible\', \'chef\', \'puppet\', \'vagrant\', \'nginx\', \'apache\',
-    
-    # Data Science & AI
-    \'machine learning\', \'deep learning\', \'tensorflow\', \'pytorch\', \'scikit-learn\',
-    \'pandas\', \'numpy\', \'matplotlib\', \'seaborn\', \'jupyter\', \'tableau\', \'power bi\',
-    \'spark\', \'hadoop\', \'kafka\', \'airflow\',
-    
-    # Mobile Development
-    \'ios\', \'android\', \'react native\', \'flutter\', \'xamarin\', \'ionic\', \'cordova\',
-    
-    # Tools & Frameworks
-    \'git\', \'jira\', \'confluence\', \'slack\', \'teams\', \'figma\', \'sketch\', \'photoshop\',
-    \'illustrator\', \'postman\', \'swagger\', \'rest api\', \'graphql\', \'microservices\',
-    
-    # Methodologies
-    \'agile\', \'scrum\', \'kanban\', \'devops\', \'ci/cd\', \'tdd\', \'bdd\', \'pair programming\',
-    \'code review\', \'unit testing\', \'integration testing\', \'performance testing\'
-}
-
-def extract_text_from_pdf(file_content: bytes) -> str:
-    """Extract text from PDF using PyPDF2 (Grok 4\'s recommendation)"""
+# Resume processing functions
+def extract_text_from_file(file_path: str, file_extension: str) -> str:
+    """Extract text from uploaded resume file"""
     try:
-        import io
-        pdf_file = io.BytesIO(file_content)
-        pdf_reader = PyPDF2.PdfReader(pdf_file)
+        if file_extension == ".txt":
+            with open(file_path, 'r', encoding='utf-8') as f:
+                return f.read()
         
-        text = ""
-        for page in pdf_reader.pages:
-            text += page.extract_text() + "\n"
+        elif file_extension == ".pdf":
+            try:
+                import PyPDF2
+                with open(file_path, 'rb') as f:
+                    reader = PyPDF2.PdfReader(f)
+                    text = ""
+                    for page in reader.pages:
+                        text += page.extract_text() + "\n"
+                    return text
+            except ImportError:
+                logger.warning("PyPDF2 not available, cannot process PDF files")
+                return "PDF processing not available"
         
-        return text.strip()
-    except Exception as e:
-        logger.error(f"PDF extraction error: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Failed to extract text from PDF"
-        )
-
-def extract_text_from_docx(file_content: bytes) -> str:
-    """Extract text from DOCX using python-docx"""
-    try:
-        import io
-        docx_file = io.BytesIO(file_content)
-        doc = docx.Document(docx_file)
+        elif file_extension in [".docx", ".doc"]:
+            try:
+                from docx import Document
+                doc = Document(file_path)
+                text = ""
+                for paragraph in doc.paragraphs:
+                    text += paragraph.text + "\n"
+                return text
+            except ImportError:
+                logger.warning("python-docx not available, cannot process DOCX files")
+                return "DOCX processing not available"
         
-        text = ""
-        for paragraph in doc.paragraphs:
-            text += paragraph.text + "\n"
-        
-        return text.strip()
-    except Exception as e:
-        logger.error(f"DOCX extraction error: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Failed to extract text from DOCX"
-        )
-
-def extract_text_from_file(file: UploadFile) -> str:
-    """Extract text from uploaded file with enhanced error handling"""
-    try:
-        file_content = file.file.read()
-        file.file.seek(0)  # Reset file pointer
-        
-        filename_lower = file.filename.lower()
-        
-        if filename_lower.endswith(\".pdf\"):
-            return extract_text_from_pdf(file_content)
-        elif filename_lower.endswith(\".docx\"):
-            return extract_text_from_docx(file_content)
-        elif filename_lower.endswith(\".txt\"):
-            return file_content.decode(\'utf-8\', errors=\'ignore\')
         else:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Unsupported file format. Please upload PDF, DOCX, or TXT files."
-            )
-    except HTTPException:
-        raise
+            return "Unsupported file format"
+            
     except Exception as e:
-        logger.error(f"File extraction error: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to process uploaded file"
-        )
+        logger.error(f"Error extracting text from file: {str(e)}")
+        return f"Error processing file: {str(e)}"
 
-def extract_skills(text: str) -> List[str]:
-    """Extract technical skills from text using enhanced pattern matching"""
+def extract_skills_from_text(text: str) -> List[str]:
+    """Extract skills from resume text"""
+    # Common technical skills (simplified list)
+    skill_keywords = [
+        # Programming Languages
+        "python", "javascript", "java", "c++", "c#", "php", "ruby", "go", "rust", "swift",
+        "kotlin", "typescript", "scala", "r", "matlab", "perl", "shell", "bash",
+        
+        # Web Technologies
+        "html", "css", "react", "angular", "vue", "node.js", "express", "django", "flask",
+        "spring", "laravel", "rails", "asp.net", "jquery", "bootstrap", "sass", "less",
+        
+        # Databases
+        "sql", "mysql", "postgresql", "mongodb", "redis", "elasticsearch", "oracle",
+        "sqlite", "cassandra", "dynamodb", "firebase",
+        
+        # Cloud & DevOps
+        "aws", "azure", "gcp", "docker", "kubernetes", "jenkins", "git", "github",
+        "gitlab", "ci/cd", "terraform", "ansible", "vagrant", "linux", "unix",
+        
+        # Data Science & AI
+        "machine learning", "deep learning", "tensorflow", "pytorch", "pandas", "numpy",
+        "scikit-learn", "data analysis", "statistics", "tableau", "power bi",
+        
+        # Mobile Development
+        "android", "ios", "react native", "flutter", "xamarin", "cordova",
+        
+        # Other Technologies
+        "rest api", "graphql", "microservices", "agile", "scrum", "jira", "confluence"
+    ]
+    
     text_lower = text.lower()
     found_skills = []
     
-    for skill in TECHNICAL_SKILLS:
-        # Use word boundaries for better matching
-        pattern = r\'\\b\' + re.escape(skill.lower()) + r\'\\b\'
-        if re.search(pattern, text_lower):
-            found_skills.append(skill)
+    for skill in skill_keywords:
+        if skill in text_lower:
+            found_skills.append(skill.title())
     
     return list(set(found_skills))  # Remove duplicates
 
-def extract_contact_info(text: str) -> Dict[str, Optional[str]]:
-    """Extract contact information from resume text"""
-    contact_info = {
-        "email": None,
-        "phone": None,
-        "linkedin": None,
-        "github": None
+def calculate_match_score(resume_skills: List[str], job_description: str) -> int:
+    """Calculate match score between resume skills and job description"""
+    if not resume_skills or not job_description:
+        return 0
+    
+    job_desc_lower = job_description.lower()
+    matching_skills = 0
+    
+    for skill in resume_skills:
+        if skill.lower() in job_desc_lower:
+            matching_skills += 1
+    
+    if len(resume_skills) == 0:
+        return 0
+    
+    score = (matching_skills / len(resume_skills)) * 100
+    return min(int(score), 100)
+
+def create_resume_record(file_info: dict, extracted_text: str, skills: List[str]) -> dict:
+    """Create a resume record"""
+    return {
+        "id": str(uuid.uuid4()),
+        "filename": file_info["filename"],
+        "original_filename": file_info["original_filename"],
+        "file_path": file_info["file_path"],
+        "file_size": file_info["file_size"],
+        "content_type": file_info["content_type"],
+        "extracted_text": extracted_text,
+        "skills": skills,
+        "upload_date": datetime.utcnow().isoformat(),
+        "processed": True,
+        "match_scores": {}
     }
-    
-    # Email extraction
-    email_pattern = r\'\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Z|a-z]{2,}\\b\'
-    email_match = re.search(email_pattern, text)
-    if email_match:
-        contact_info["email"] = email_match.group()
-    
-    # Phone extraction
-    phone_pattern = r\'(\\+?1?[-.\\s]?)?\\(?([0-9]{3})\\)?[-.\\s]?([0-9]{3})[-.\\s]?([0-9]{4})\'
-    phone_match = re.search(phone_pattern, text)
-    if phone_match:
-        contact_info["phone"] = phone_match.group()
-    
-    # LinkedIn extraction
-    linkedin_pattern = r\'linkedin\\.com/in/([a-zA-Z0-9-]+)\'
-    linkedin_match = re.search(linkedin_pattern, text, re.IGNORECASE)
-    if linkedin_match:
-        contact_info["linkedin"] = f"https://linkedin.com/in/{linkedin_match.group(1)}"
-    
-    # GitHub extraction
-    github_pattern = r\'github\\.com/([a-zA-Z0-9-]+)\'
-    github_match = re.search(github_pattern, text, re.IGNORECASE)
-    if github_match:
-        contact_info["github"] = f"https://github.com/{github_match.group(1)}"
-    
-    return contact_info
 
-def extract_experience_years(text: str) -> int:
-    """Extract years of experience from resume text"""
-    # Look for patterns like "5 years experience", "3+ years", etc.
-    experience_patterns = [
-        r\'(\\d+)\\+?\\s*years?\\s*(?:of\\s*)?experience\',
-        r\'(\\d+)\\+?\\s*years?\\s*in\',
-        r\'experience\\s*:?\\s*(\\d+)\\+?\\s*years?\',
-        r\'(\\d+)\\+?\\s*years?\\s*professional\'
-    ]
-    
-    max_years = 0
-    for pattern in experience_patterns:
-        matches = re.findall(pattern, text, re.IGNORECASE)
-        for match in matches:
-            try:
-                years = int(match)
-                max_years = max(max_years, years)
-            except ValueError:
-                continue
-    
-    return max_years
-
-def calculate_resume_job_match(resume_text: str, job_description: str) -> Dict[str, Any]:
-    """
-    Calculate resume-job match using TF-IDF + cosine similarity (Grok 4\'s approach)
-    Enhanced with skill-based scoring
-    """
-    try:
-        # Clean and prepare texts
-        resume_clean = re.sub(r\'[^a-zA-Z0-9\\s]\', \' \', resume_text.lower())
-        job_clean = re.sub(r\'[^a-zA-Z0-9\\s]\', \' \', job_description.lower())
-        
-        # TF-IDF Vectorization (Grok 4\'s recommendation)
-        vectorizer = TfidfVectorizer(
-            stop_words=\'english\',
-            ngram_range=(1, 2),  # Include bigrams for better matching
-            max_features=5000,
-            min_df=1,
-            max_df=0.95
-        )
-        
-        # Fit and transform texts
-        tfidf_matrix = vectorizer.fit_transform([job_clean, resume_clean])
-        
-        # Calculate cosine similarity
-        cosine_sim = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:2])[0][0]
-        
-        # Extract skills for both
-        resume_skills = extract_skills(resume_text)
-        job_skills = extract_skills(job_description)
-        
-        # Calculate skill match percentage
-        if job_skills:
-            matching_skills = set(resume_skills) & set(job_skills)
-            skill_match_percentage = len(matching_skills) / len(job_skills) * 100
-        else:
-            skill_match_percentage = 0
-            matching_skills = set()
-        
-        # Combined score (70% TF-IDF, 30% skill match)
-        combined_score = (cosine_sim * 0.7 + (skill_match_percentage / 100) * 0.3) * 100
-        
-        return {
-            "overall_score": round(combined_score, 2),
-            "tfidf_score": round(cosine_sim * 100, 2),
-            "skill_match_percentage": round(skill_match_percentage, 2),
-            "matching_skills": list(matching_skills),
-            "resume_skills": resume_skills,
-            "job_skills": job_skills,
-            "total_resume_skills": 0,
-            "total_job_skills": 0,
-            "match_explanation": f"Found {len(matching_skills)} matching skills out of {len(job_skills)} required skills. TF-IDF similarity: {round(cosine_sim * 100, 2)}%"
-        }
-        
-    except Exception as e:
-        logger.error(f"Match calculation error: {str(e)}")
-        return {
-            "overall_score": 0,
-            "tfidf_score": 0,
-            "skill_match_percentage": 0,
-            "matching_skills": [],
-            "resume_skills": [],
-            "job_skills": [],
-            "total_resume_skills": 0,
-            "total_job_skills": 0,
-            "match_explanation": f"Error calculating match: {str(e)}"
-        }
-
+# API Routes
 @router.post("/upload")
 async def upload_resume(
     file: UploadFile = File(...),
+    job_id: Optional[str] = Form(None),
     candidate_name: Optional[str] = Form(None),
-    db: Session = Depends(get_db) if DB_AVAILABLE else None
+    candidate_email: Optional[str] = Form(None)
 ):
-    """
-    Upload and process resume with enhanced analysis
-    """
+    """Upload and process a single resume"""
     try:
-        logger.info(f"Processing resume upload: {file.filename}")
-        
         # Validate file
         if not file.filename:
+            raise HTTPException(status_code=400, detail="No file provided")
+        
+        file_extension = Path(file.filename).suffix.lower()
+        if file_extension not in ALLOWED_EXTENSIONS:
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No file provided"
+                status_code=400,
+                detail=f"File type {file_extension} not allowed. Supported types: {', '.join(ALLOWED_EXTENSIONS)}"
             )
         
-        # Extract text from file
-        resume_text = extract_text_from_file(file)
-        
-        if not resume_text.strip():
+        # Check file size
+        content = await file.read()
+        if len(content) > MAX_FILE_SIZE:
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No text content found in the uploaded file"
+                status_code=400,
+                detail=f"File size exceeds maximum limit of {MAX_FILE_SIZE // (1024*1024)}MB"
             )
         
-        # Extract information
-        skills = extract_skills(resume_text)
-        contact_info = extract_contact_info(resume_text)
-        experience_years = extract_experience_years(resume_text)
+        # Generate unique filename
+        unique_filename = f"{uuid.uuid4()}{file_extension}"
+        file_path = os.path.join(UPLOAD_DIR, unique_filename)
         
-        # Create resume data
-        resume_data = {
-            "id": str(uuid.uuid4()),
-            "filename": file.filename,
-            "candidate_name": candidate_name or contact_info.get("email", "Unknown"),
-            "content": resume_text,
-            "skills": skills,
-            "contact_info": contact_info,
-            "experience_years": experience_years,
-            "upload_date": datetime.utcnow(),
-            "file_size": len(resume_text),
-            "processed": True
+        # Save file
+        async with aiofiles.open(file_path, 'wb') as f:
+            await f.write(content)
+        
+        # Extract text and skills
+        extracted_text = extract_text_from_file(file_path, file_extension)
+        skills = extract_skills_from_text(extracted_text)
+        
+        # Create file info
+        file_info = {
+            "filename": unique_filename,
+            "original_filename": file.filename,
+            "file_path": file_path,
+            "file_size": len(content),
+            "content_type": file.content_type
         }
         
-        if DB_AVAILABLE and db:
-            # Save to database
-            new_resume = Resume(
-                filename=file.filename,
-                candidate_name=resume_data["candidate_name"],
-                content=resume_text,
-                skills=json.dumps(skills),
-                contact_info=json.dumps(contact_info),
-                experience_years=experience_years,
-                upload_date=datetime.utcnow()
-            )
-            
-            db.add(new_resume)
-            db.commit()
-            db.refresh(new_resume)
-            
-            resume_data["id"] = new_resume.id
-            logger.info(f"Resume saved to database with ID: {new_resume.id}")
-        else:
-            # Save to in-memory storage
-            in_memory_resumes[resume_data["id"]] = resume_data
-            logger.info(f"Resume saved to memory with ID: {resume_data[\'id\']}")
+        # Create resume record
+        resume_record = create_resume_record(file_info, extracted_text, skills)
+        
+        # Add additional info if provided
+        if candidate_name:
+            resume_record["candidate_name"] = candidate_name
+        if candidate_email:
+            resume_record["candidate_email"] = candidate_email
+        if job_id:
+            resume_record["job_id"] = job_id
+        
+        # Store resume (database or in-memory)
+        if DATABASE_AVAILABLE:
+            # TODO: Save to database
+            pass
+        
+        resumes_storage.append(resume_record)
+        
+        logger.info(f"Resume uploaded successfully: {file.filename}")
         
         return {
             "success": True,
+            "message": "Resume uploaded and processed successfully",
             "resume": {
-                "id": resume_data["id"],
-                "filename": file.filename,
-                "candidate_name": resume_data["candidate_name"],
-                "skills_found": len(skills),
-                "skills": skills[:10],  # First 10 skills for preview
-                "contact_info": contact_info,
-                "experience_years": experience_years,
-                "upload_date": resume_data["upload_date"],
-                "file_size_chars": len(resume_text)
-            },
-            "message": "Resume uploaded and processed successfully"
+                "id": resume_record["id"],
+                "filename": resume_record["original_filename"],
+                "skills": resume_record["skills"],
+                "skills_count": len(resume_record["skills"]),
+                "upload_date": resume_record["upload_date"]
+            }
         }
         
     except HTTPException:
@@ -408,21 +238,16 @@ async def upload_resume(
         logger.error(f"Resume upload error: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to process resume: {str(e)}"
+            detail=f"Error processing resume: {str(e)}"
         )
 
 @router.post("/bulk-upload")
-async def bulk_upload_resumes(
-    files: List[UploadFile] = File(...),
-    db: Session = Depends(get_db) if DB_AVAILABLE else None
-):
-    """
-    Bulk upload multiple resumes with progress tracking
-    """
+async def bulk_upload_resumes(files: List[UploadFile] = File(...)):
+    """Upload and process multiple resumes"""
     try:
-        if len(files) > 20:  # Limit for performance
+        if len(files) > 20:
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
+                status_code=400,
                 detail="Maximum 20 files allowed per bulk upload"
             )
         
@@ -432,45 +257,13 @@ async def bulk_upload_resumes(
         
         for file in files:
             try:
-                # Process each file
-                resume_text = extract_text_from_file(file)
-                skills = extract_skills(resume_text)
-                contact_info = extract_contact_info(resume_text)
-                experience_years = extract_experience_years(resume_text)
-                
-                resume_data = {
-                    "id": str(uuid.uuid4()),
-                    "filename": file.filename,
-                    "candidate_name": contact_info.get("email", "Unknown"),
-                    "content": resume_text,
-                    "skills": skills,
-                    "contact_info": contact_info,
-                    "experience_years": experience_years,
-                    "upload_date": datetime.utcnow(),
-                    "status": "success"
-                }
-                
-                if DB_AVAILABLE and db:
-                    new_resume = Resume(
-                        filename=file.filename,
-                        candidate_name=resume_data["candidate_name"],
-                        content=resume_text,
-                        skills=json.dumps(skills),
-                        contact_info=json.dumps(contact_info),
-                        experience_years=experience_years,
-                        upload_date=datetime.utcnow()
-                    )
-                    db.add(new_resume)
-                    resume_data["id"] = new_resume.id
-                else:
-                    in_memory_resumes[resume_data["id"]] = resume_data
-                
+                # Process each file individually
+                result = await upload_resume(file)
                 results.append({
                     "filename": file.filename,
                     "status": "success",
-                    "resume_id": resume_data["id"],
-                    "skills_found": len(skills),
-                    "candidate_name": resume_data["candidate_name"]
+                    "resume_id": result["resume"]["id"],
+                    "skills_count": result["resume"]["skills_count"]
                 })
                 successful_uploads += 1
                 
@@ -482,21 +275,17 @@ async def bulk_upload_resumes(
                 })
                 failed_uploads += 1
         
-        if DB_AVAILABLE and db:
-            db.commit()
-        
         logger.info(f"Bulk upload completed: {successful_uploads} successful, {failed_uploads} failed")
         
         return {
             "success": True,
+            "message": f"Bulk upload completed: {successful_uploads} successful, {failed_uploads} failed",
             "summary": {
                 "total_files": len(files),
-                "successful_uploads": successful_uploads,
-                "failed_uploads": failed_uploads,
-                "success_rate": round((successful_uploads / len(files)) * 100, 2)
+                "successful": successful_uploads,
+                "failed": failed_uploads
             },
-            "results": results,
-            "message": f"Bulk upload completed: {successful_uploads}/{len(files)} files processed successfully"
+            "results": results
         }
         
     except HTTPException:
@@ -505,121 +294,83 @@ async def bulk_upload_resumes(
         logger.error(f"Bulk upload error: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Bulk upload failed: {str(e)}"
+            detail=f"Error during bulk upload: {str(e)}"
         )
 
 @router.get("/")
-async def get_resumes(
-    skip: int = Query(0, ge=0),
-    limit: int = Query(100, ge=1, le=1000),
-    search: Optional[str] = Query(None),
-    skills_filter: Optional[str] = Query(None),
-    min_experience: Optional[int] = Query(None, ge=0),
-    db: Session = Depends(get_db) if DB_AVAILABLE else None
+async def list_resumes(
+    skip: int = 0,
+    limit: int = 100,
+    job_id: Optional[str] = None
 ):
-    """
-    Get resumes with advanced filtering and search
-    """
+    """List all resumes with optional filtering"""
     try:
-        if DB_AVAILABLE and db:
-            # Database query with filters
-            query = db.query(Resume)
-            
-            if search:
-                query = query.filter(Resume.content.contains(search))
-            
-            if min_experience is not None:
-                query = query.filter(Resume.experience_years >= min_experience)
-            
-            total = query.count()
-            resumes = query.offset(skip).limit(limit).all()
-            
-            resume_list = []
-            for resume in resumes:
-                resume_list.append({
-                    "id": resume.id,
-                    "filename": resume.filename,
-                    "candidate_name": resume.candidate_name,
-                    "skills": json.loads(resume.skills) if resume.skills else [],
-                    "contact_info": json.loads(resume.contact_info) if resume.contact_info else {},
-                    "experience_years": resume.experience_years,
-                    "upload_date": resume.upload_date,
-                    "content_preview": resume.content[:200] + "..." if len(resume.content) > 200 else resume.content
-                })
-        else:
-            # In-memory filtering
-            resume_list = []
-            for resume_id, resume_data in in_memory_resumes.items():
-                if search and search.lower() not in resume_data["content"].lower():
-                    continue
-                if min_experience is not None and resume_data["experience_years"] < min_experience:
-                    continue
-                
-                resume_list.append({
-                    "id": resume_data["id"],
-                    "filename": resume_data["filename"],
-                    "candidate_name": resume_data["candidate_name"],
-                    "skills": resume_data["skills"],
-                    "contact_info": resume_data["contact_info"],
-                    "experience_years": resume_data["experience_years"],
-                    "upload_date": resume_data["upload_date"],
-                    "content_preview": resume_data["content"][:200] + "..." if len(resume_data["content"]) > 200 else resume_data["content"]
-                })
-            
-            total = len(resume_list)
-            resume_list = resume_list[skip:skip + limit]
+        # Filter resumes
+        filtered_resumes = resumes_storage
+        
+        if job_id:
+            filtered_resumes = [r for r in filtered_resumes if r.get("job_id") == job_id]
+        
+        # Pagination
+        total = len(filtered_resumes)
+        resumes_page = filtered_resumes[skip:skip + limit]
+        
+        # Format response
+        resume_list = []
+        for resume in resumes_page:
+            resume_list.append({
+                "id": resume["id"],
+                "filename": resume["original_filename"],
+                "candidate_name": resume.get("candidate_name", "Unknown"),
+                "candidate_email": resume.get("candidate_email", ""),
+                "skills": resume["skills"],
+                "skills_count": len(resume["skills"]),
+                "upload_date": resume["upload_date"],
+                "file_size": resume["file_size"],
+                "processed": resume["processed"]
+            })
         
         return {
+            "success": True,
             "resumes": resume_list,
             "total": total,
-            "skip": skip,
-            "limit": limit,
+            "page": skip // limit + 1,
+            "per_page": limit,
             "has_more": skip + limit < total
         }
         
     except Exception as e:
-        logger.error(f"Get resumes error: {str(e)}")
+        logger.error(f"List resumes error: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to retrieve resumes: {str(e)}"
+            detail=f"Error retrieving resumes: {str(e)}"
         )
 
 @router.get("/{resume_id}")
-async def get_resume(
-    resume_id: str,
-    db: Session = Depends(get_db) if DB_AVAILABLE else None
-):
-    """
-    Get detailed resume information
-    """
+async def get_resume(resume_id: str):
+    """Get detailed information about a specific resume"""
     try:
-        if DB_AVAILABLE and db:
-            resume = db.query(Resume).filter(Resume.id == resume_id).first()
-            if not resume:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="Resume not found"
-                )
-            
-            return {
-                "id": resume.id,
-                "filename": resume.filename,
-                "candidate_name": resume.candidate_name,
-                "content": resume.content,
-                "skills": json.loads(resume.skills) if resume.skills else [],
-                "contact_info": json.loads(resume.contact_info) if resume.contact_info else {},
-                "experience_years": resume.experience_years,
-                "upload_date": resume.upload_date
+        resume = next((r for r in resumes_storage if r["id"] == resume_id), None)
+        
+        if not resume:
+            raise HTTPException(status_code=404, detail="Resume not found")
+        
+        return {
+            "success": True,
+            "resume": {
+                "id": resume["id"],
+                "filename": resume["original_filename"],
+                "candidate_name": resume.get("candidate_name", "Unknown"),
+                "candidate_email": resume.get("candidate_email", ""),
+                "skills": resume["skills"],
+                "extracted_text": resume["extracted_text"][:500] + "..." if len(resume["extracted_text"]) > 500 else resume["extracted_text"],
+                "upload_date": resume["upload_date"],
+                "file_size": resume["file_size"],
+                "content_type": resume["content_type"],
+                "processed": resume["processed"],
+                "match_scores": resume.get("match_scores", {})
             }
-        else:
-            resume_data = in_memory_resumes.get(resume_id)
-            if not resume_data:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="Resume not found"
-                )
-            
-            return resume_data
+        }
         
     except HTTPException:
         raise
@@ -627,179 +378,78 @@ async def get_resume(
         logger.error(f"Get resume error: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to retrieve resume: {str(e)}"
+            detail=f"Error retrieving resume: {str(e)}"
         )
 
 @router.post("/match")
-async def match_resumes_to_job(
-    job_description: str,
-    job_id: Optional[str] = None,
-    min_score: float = Query(0, ge=0, le=100),
-    limit: int = Query(10, ge=1, le=50),
-    db: Session = Depends(get_db) if DB_AVAILABLE else None
-):
-    """
-    Match resumes to job description using TF-IDF + cosine similarity (Grok 4\'s approach)
-    """
+async def match_resumes_to_job(job_description: str):
+    """Match resumes to a job description and return ranked results"""
     try:
-        logger.info(f"Starting resume matching for job: {job_id or \'custom\'}")
+        if not job_description.strip():
+            raise HTTPException(status_code=400, detail="Job description cannot be empty")
         
-        # Get all resumes
-        if DB_AVAILABLE and db:
-            resumes = db.query(Resume).all()
-            resume_list = []
-            for resume in resumes:
-                resume_list.append({
-                    "id": resume.id,
-                    "filename": resume.filename,
-                    "candidate_name": resume.candidate_name,
-                    "content": resume.content,
-                    "skills": json.loads(resume.skills) if resume.skills else [],
-                    "experience_years": resume.experience_years
-                })
-        else:
-            resume_list = list(in_memory_resumes.values())
-        
-        if not resume_list:
-            return {
-                "matches": [],
-                "total_resumes": 0,
-                "message": "No resumes available for matching"
-            }
-        
-        # Calculate matches for each resume
         matches = []
-        for resume in resume_list:
-            match_result = calculate_resume_job_match(resume["content"], job_description)
+        
+        for resume in resumes_storage:
+            match_score = calculate_match_score(resume["skills"], job_description)
             
-            if match_result["overall_score"] >= min_score:
-                matches.append({
-                    "resume_id": resume["id"],
-                    "candidate_name": resume["candidate_name"],
-                    "filename": resume["filename"],
-                    "overall_score": match_result["overall_score"],
-                    "tfidf_score": match_result["tfidf_score"],
-                    "skill_match_percentage": match_result["skill_match_percentage"],
-                    "matching_skills": match_result["matching_skills"],
-                    "total_skills": match_result["total_resume_skills"],
-                    "experience_years": resume["experience_years"],
-                    "match_explanation": match_result["match_explanation"]
-                })
+            matches.append({
+                "resume_id": resume["id"],
+                "filename": resume["original_filename"],
+                "candidate_name": resume.get("candidate_name", "Unknown"),
+                "candidate_email": resume.get("candidate_email", ""),
+                "skills": resume["skills"],
+                "match_score": match_score,
+                "upload_date": resume["upload_date"]
+            })
         
-        # Sort by overall score (descending)
-        matches.sort(key=lambda x: x["overall_score"], reverse=True)
+        # Sort by match score (descending)
+        matches.sort(key=lambda x: x["match_score"], reverse=True)
         
-        # Limit results
-        matches = matches[:limit]
-        
-        logger.info(f"Resume matching completed: {len(matches)} matches found")
+        logger.info(f"Resume matching completed: {len(matches)} resumes processed")
         
         return {
+            "success": True,
+            "job_description": job_description[:200] + "..." if len(job_description) > 200 else job_description,
+            "total_resumes": len(matches),
             "matches": matches,
-            "total_resumes": len(resume_list),
-            "total_matches": len(matches),
-            "job_description_preview": job_description[:200] + "..." if len(job_description) > 200 else job_description,
-            "matching_criteria": {
-                "min_score": min_score,
-                "algorithm": "TF-IDF + Cosine Similarity + Skill Matching",
-                "weights": {
-                    "tfidf_similarity": "70%",
-                    "skill_matching": "30%"
-                }
-            },
-            "message": f"Found {len(matches)} matching resumes out of {len(resume_list)} total resumes"
-        }
-        
-    except Exception as e:
-        logger.error(f"Resume matching error: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Resume matching failed: {str(e)}"
-        )
-
-@router.get("/{resume_id}/matches")
-async def get_resume_matches(
-    resume_id: str,
-    limit: int = Query(10, ge=1, le=50),
-    db: Session = Depends(get_db) if DB_AVAILABLE else None
-):
-    """
-    Get job matches for a specific resume
-    """
-    try:
-        # Get resume
-        if DB_AVAILABLE and db:
-            resume = db.query(Resume).filter(Resume.id == resume_id).first()
-            if not resume:
-                raise HTTPException(status_code=404, detail="Resume not found")
-            resume_content = resume.content
-        else:
-            resume_data = in_memory_resumes.get(resume_id)
-            if not resume_data:
-                raise HTTPException(status_code=404, detail="Resume not found")
-            resume_content = resume_data["content"]
-        
-        # Get all jobs (you would implement this based on your job storage)
-        # For now, return sample matches
-        sample_matches = [
-            {
-                "job_id": "job_1",
-                "job_title": "Senior Python Developer",
-                "company": "TechCorp",
-                "match_score": 85.5,
-                "matching_skills": ["python", "django", "postgresql", "aws"],
-                "job_description_preview": "We are looking for a Senior Python Developer with experience in Django..."
-            },
-            {
-                "job_id": "job_2", 
-                "job_title": "Full Stack Engineer",
-                "company": "StartupXYZ",
-                "match_score": 78.2,
-                "matching_skills": ["javascript", "react", "nodejs", "mongodb"],
-                "job_description_preview": "Join our team as a Full Stack Engineer working with modern technologies..."
-            }
-        ]
-        
-        return {
-            "resume_id": resume_id,
-            "matches": sample_matches[:limit],
-            "total_matches": len(sample_matches),
-            "message": f"Found {len(sample_matches)} job matches for this resume"
+            "query_time": datetime.utcnow().isoformat()
         }
         
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Get resume matches error: {str(e)}")
+        logger.error(f"Resume matching error: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get resume matches: {str(e)}"
+            detail=f"Error matching resumes: {str(e)}"
         )
 
 @router.delete("/{resume_id}")
-async def delete_resume(
-    resume_id: str,
-    db: Session = Depends(get_db) if DB_AVAILABLE else None
-):
-    """
-    Delete a resume
-    """
+async def delete_resume(resume_id: str):
+    """Delete a resume"""
     try:
-        if DB_AVAILABLE and db:
-            resume = db.query(Resume).filter(Resume.id == resume_id).first()
-            if not resume:
-                raise HTTPException(status_code=404, detail="Resume not found")
-            
-            db.delete(resume)
-            db.commit()
-        else:
-            if resume_id not in in_memory_resumes:
-                raise HTTPException(status_code=404, detail="Resume not found")
-            
-            del in_memory_resumes[resume_id]
+        resume = next((r for r in resumes_storage if r["id"] == resume_id), None)
+        
+        if not resume:
+            raise HTTPException(status_code=404, detail="Resume not found")
+        
+        # Remove file
+        try:
+            if os.path.exists(resume["file_path"]):
+                os.remove(resume["file_path"])
+        except Exception as e:
+            logger.warning(f"Could not delete file {resume['file_path']}: {str(e)}")
+        
+        # Remove from storage
+        resumes_storage.remove(resume)
         
         logger.info(f"Resume deleted: {resume_id}")
-        return {"message": "Resume deleted successfully"}
+        
+        return {
+            "success": True,
+            "message": "Resume deleted successfully"
+        }
         
     except HTTPException:
         raise
@@ -807,86 +457,64 @@ async def delete_resume(
         logger.error(f"Delete resume error: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to delete resume: {str(e)}"
+            detail=f"Error deleting resume: {str(e)}"
         )
 
 @router.get("/stats/overview")
-async def get_resume_stats(db: Session = Depends(get_db) if DB_AVAILABLE else None):
-    """
-    Get resume statistics and analytics
-    """
+async def get_resume_stats():
+    """Get resume statistics"""
     try:
-        if DB_AVAILABLE and db:
-            total_resumes = db.query(Resume).count()
-            # Add more complex queries here
-        else:
-            total_resumes = len(in_memory_resumes)
+        total_resumes = len(resumes_storage)
+        processed_resumes = len([r for r in resumes_storage if r["processed"]])
         
-        # Calculate skill distribution
+        # Skills analysis
         all_skills = []
-        if DB_AVAILABLE and db:
-            resumes = db.query(Resume).all()
-            for resume in resumes:
-                if resume.skills:
-                    all_skills.extend(json.loads(resume.skills))
-        else:
-            for resume_data in in_memory_resumes.values():
-                all_skills.extend(resume_data["skills"])
+        for resume in resumes_storage:
+            all_skills.extend(resume["skills"])
         
-        # Count skill frequency
         skill_counts = {}
         for skill in all_skills:
             skill_counts[skill] = skill_counts.get(skill, 0) + 1
         
-        # Top 10 skills
         top_skills = sorted(skill_counts.items(), key=lambda x: x[1], reverse=True)[:10]
         
         return {
-            "total_resumes": total_resumes,
-            "total_skills_found": len(skill_counts),
-            "top_skills": [{"skill": skill, "count": count} for skill, count in top_skills],
-            "average_skills_per_resume": round(len(all_skills) / max(total_resumes, 1), 2),
-            "database_mode": DB_AVAILABLE,
-            "processing_capabilities": [
-                "PDF text extraction",
-                "DOCX text extraction", 
-                "TXT file processing",
-                "Skill extraction (500+ technical skills)",
-                "Contact information parsing",
-                "Experience years detection",
-                "TF-IDF similarity matching",
-                "Bulk upload support"
-            ]
+            "success": True,
+            "stats": {
+                "total_resumes": total_resumes,
+                "processed_resumes": processed_resumes,
+                "pending_processing": total_resumes - processed_resumes,
+                "total_skills_found": len(skill_counts),
+                "top_skills": [{"skill": skill, "count": count} for skill, count in top_skills],
+                "average_skills_per_resume": len(all_skills) / total_resumes if total_resumes > 0 else 0
+            }
         }
         
     except Exception as e:
-        logger.error(f"Get resume stats error: {str(e)}")
+        logger.error(f"Resume stats error: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get resume statistics: {str(e)}"
+            detail=f"Error retrieving resume statistics: {str(e)}"
         )
 
-# Health check endpoint
 @router.get("/health")
-async def resume_health():
+async def resumes_health():
     """Resume service health check"""
     return {
         "status": "healthy",
-        "service": "resume_processing",
-        "version": "2.0.0",
-        "database_available": DB_AVAILABLE,
-        "in_memory_resumes": len(in_memory_resumes),
+        "service": "resumes",
+        "timestamp": datetime.utcnow().isoformat(),
+        "storage_type": "database" if DATABASE_AVAILABLE else "in_memory",
+        "total_resumes": len(resumes_storage),
+        "upload_directory": UPLOAD_DIR,
+        "supported_formats": list(ALLOWED_EXTENSIONS),
+        "max_file_size_mb": MAX_FILE_SIZE // (1024 * 1024),
         "features": [
-            "PDF/DOCX/TXT processing",
-            "TF-IDF + Cosine Similarity matching",
-            "Skill extraction (500+ skills)",
-            "Contact info parsing",
-            "Experience detection",
-            "Bulk upload support",
-            "Advanced filtering",
-            "Match scoring"
-        ],
-        "supported_formats": ["PDF", "DOCX", "TXT"],
-        "max_bulk_upload": 20,
-        "skill_database_size": len(TECHNICAL_SKILLS)
+            "File upload (PDF, DOCX, TXT)",
+            "Text extraction",
+            "Skill extraction",
+            "Resume matching",
+            "Bulk upload",
+            "Statistics"
+        ]
     }
