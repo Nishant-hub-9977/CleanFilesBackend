@@ -1,3 +1,6 @@
+
+
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -31,13 +34,13 @@ app.add_middleware(
         \"http://localhost:3000\",
         \"http://localhost:5173\",
         \"http://127.0.0.1:3000\",
-        \"http://127.00.1:5173\"
+        \"http://127.0.0.1:5173\"
     ],
     allow_credentials=True,
     allow_methods=[\"GET\", \"POST\", \"PUT\", \"DELETE\", \"OPTIONS\", \"PATCH\"],
     allow_headers=[\"*\"],
     expose_headers=[\"*\"]
- )
+)
 
 # Create upload directories
 upload_dirs = [\"uploads\", \"uploads/resumes\", \"uploads/temp\"]
@@ -374,4 +377,3 @@ if __name__ == \"__main__\":
         reload=os.getenv(\"DEBUG\", \"false\").lower() == \"true\",
         log_level=\"info\"
     )
-
