@@ -1,280 +1,204 @@
-
-
-
-from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel
-from typing import List, Optional
+from fastapi import APIRouter, HTTPException, status
+from fastapi.responses import JSONResponse
+from typing import List, Optional, Dict, Any
+import logging
 from datetime import datetime
 import uuid
-import json
+from pydantic import BaseModel
 
+# Configure logging
+logger = logging.getLogger(__name__)
+
+# Create router
 router = APIRouter()
-security = HTTPBearer()
 
 # Pydantic models
 class JobCreate(BaseModel):
     title: str
     description: str
-    requirements: List[str]
-    location: str
-    salary_range: Optional[str] = None
-    employment_type: str = "Full-time"
-    experience_level: str = "Mid-level"
-    skills_required: List[str] = []
+    requirements: Optional[List[str]] = []
+    status: Optional[str] = "active"
     department: Optional[str] = None
+    location: Optional[str] = None
+    salary_range: Optional[str] = None
 
 class JobUpdate(BaseModel):
     title: Optional[str] = None
     description: Optional[str] = None
     requirements: Optional[List[str]] = None
+    status: Optional[str] = None
+    department: Optional[str] = None
     location: Optional[str] = None
     salary_range: Optional[str] = None
-    employment_type: Optional[str] = None
-    experience_level: Optional[str] = None
-    skills_required: Optional[List[str]] = None
-    department: Optional[str] = None
-    status: Optional[str] = None
 
-class JobResponse(BaseModel):
-    id: str
-    title: str
-    description: str
-    requirements: List[str]
-    location: str
-    salary_range: Optional[str]
-    employment_type: str
-    experience_level: str
-    skills_required: List[str]
-    department: Optional[str]
-    created_at: datetime
-    updated_at: datetime
-    created_by: str
-    applications_count: int
-    views_count: int
-    status: str
+# In-memory storage for jobs (no database required)
+jobs_storage = []
 
-# In-memory storage for demo/fallback mode
-mock_jobs = [
-    {
-        "id": "job1",
-        "title": "Senior Software Engineer",
-        "description": "We are looking for a passionate Senior Software Engineer to join our team. You will be responsible for developing and maintaining high-quality software solutions.",
-        "requirements": ["5+ years experience", "Strong Python skills", "Experience with FastAPI"],
-        "location": "Remote",
-        "salary_range": "$120,000 - $150,000",
-        "employment_type": "Full-time",
-        "experience_level": "Senior",
-        "skills_required": ["Python", "FastAPI", "SQLAlchemy", "Docker", "AWS"],
-        "department": "Engineering",
-        "created_at": datetime.fromisoformat("2024-01-01T10:00:00Z"),
-        "updated_at": datetime.fromisoformat("2024-01-01T10:00:00Z"),
-        "created_by": "admin_id",
-        "applications_count": 15,
-        "views_count": 120,
-        "status": "active"
-    },
-    {
-        "id": "job2",
-        "title": "Frontend Developer",
-        "description": "Join our dynamic team as a Frontend Developer and build amazing user interfaces using modern web technologies.",
-        "requirements": ["3+ years experience", "Proficiency in React", "HTML, CSS, JavaScript"],
-        "location": "New York, NY",
-        "salary_range": "$90,000 - $110,000",
-        "employment_type": "Full-time",
-        "experience_level": "Mid-level",
-        "skills_required": ["React", "JavaScript", "HTML", "CSS", "TypeScript", "Redux"],
-        "department": "Engineering",
-        "created_at": datetime.fromisoformat("2024-01-05T11:30:00Z"),
-        "updated_at": datetime.fromisoformat("2024-01-05T11:30:00Z"),
-        "created_by": "recruiter_id",
-        "applications_count": 20,
-        "views_count": 150,
-        "status": "active"
-    },
-    {
-        "id": "job3",
-        "title": "DevOps Engineer",
-        "description": "We need an experienced DevOps Engineer to streamline our development and operations processes.",
-        "requirements": ["4+ years experience", "Kubernetes, Docker", "CI/CD pipelines"],
-        "location": "San Francisco, CA",
-        "salary_range": "$130,000 - $160,000",
-        "employment_type": "Full-time",
-        "experience_level": "Senior",
-        "skills_required": ["Docker", "Kubernetes", "AWS", "Azure", "CI/CD", "Ansible", "Terraform"],
-        "department": "Operations",
-        "created_at": datetime.fromisoformat("2024-01-10T09:00:00Z"),
-        "updated_at": datetime.fromisoformat("2024-01-10T09:00:00Z"),
-        "created_by": "admin_id",
-        "applications_count": 12,
-        "views_count": 90,
-        "status": "active"
-    },
-    {
-        "id": "job4",
-        "title": "Data Scientist",
-        "description": "As a Data Scientist, you will be responsible for analyzing large datasets and building predictive models.",
-        "requirements": ["PhD or Master's in a quantitative field", "Strong Python/R skills", "Machine Learning"],
-        "location": "Boston, MA",
-        "salary_range": "$110,000 - $140,000",
-        "employment_type": "Full-time",
-        "experience_level": "Mid-level",
-        "skills_required": ["Python", "R", "Machine Learning", "SQL", "Pandas", "NumPy", "Scikit-learn"],
-        "department": "Data Science",
-        "created_at": datetime.fromisoformat("2024-01-15T14:00:00Z"),
-        "updated_at": datetime.fromisoformat("2024-01-15T14:00:00Z"),
-        "created_by": "recruiter_id",
-        "applications_count": 8,
-        "views_count": 70,
-        "status": "closed"
-    },
-    {
-        "id": "job5",
-        "title": "UI/UX Designer",
-        "description": "Create intuitive and visually appealing user interfaces for our web and mobile applications.",
-        "requirements": ["2+ years experience", "Proficiency in Figma, Sketch, Adobe XD", "User-centered design"],
-        "location": "Remote",
-        "salary_range": "$80,000 - $100,000",
-        "employment_type": "Full-time",
-        "experience_level": "Junior",
-        "skills_required": ["Figma", "Sketch", "Adobe XD", "User Research", "Prototyping", "Wireframing"],
-        "department": "Design",
-        "created_at": datetime.fromisoformat("2024-01-20T16:00:00Z"),
-        "updated_at": datetime.fromisoformat("2024-01-20T16:00:00Z"),
-        "created_by": "admin_id",
-        "applications_count": 18,
-        "views_count": 110,
-        "status": "active"
-    }
-]
-
-# Helper function to get current user (mock for now)
-async def get_current_user():
-    # In a real application, this would validate a token and return user info
-    return {"id": "mock_user", "email": "mock@example.com", "role": "admin"}
-
-@router.post("/", response_model=JobResponse)
-async def create_job(job: JobCreate, current_user: dict = Depends(get_current_user)):
-    """Create a new job posting"""
-    new_job = job.dict()
-    new_job["id"] = str(uuid.uuid4())
-    new_job["created_at"] = datetime.utcnow()
-    new_job["updated_at"] = datetime.utcnow()
-    new_job["created_by"] = current_user["id"]
-    new_job["applications_count"] = 0
-    new_job["views_count"] = 0
-    new_job["status"] = "active"
-    mock_jobs.append(new_job)
-    return new_job
-
-@router.get("/", response_model=List[JobResponse])
-async def get_all_jobs(current_user: dict = Depends(get_current_user)):
-    """Retrieve all job postings"""
-    return mock_jobs
-
-@router.get("/{job_id}", response_model=JobResponse)
-async def get_job_by_id(job_id: str, current_user: dict = Depends(get_current_user)):
-    """Retrieve a single job posting by ID"""
-    job = next((job for job in mock_jobs if job["id"] == job_id), None)
-    if job is None:
-        raise HTTPException(status_code=404, detail="Job not found")
-    return job
-
-@router.put("/{job_id}", response_model=JobResponse)
-async def update_job(job_id: str, job_update: JobUpdate, current_user: dict = Depends(get_current_user)):
-    """Update an existing job posting"""
-    job_index = next((i for i, job in enumerate(mock_jobs) if job["id"] == job_id), None)
-    if job_index is None:
-        raise HTTPException(status_code=404, detail="Job not found")
-    
-    current_job = mock_jobs[job_index]
-    updated_data = job_update.dict(exclude_unset=True)
-    for key, value in updated_data.items():
-        if key == "skills_required" and isinstance(value, str):
-            current_job[key] = [s.strip() for s in value.split(",")]
-        else:
-            current_job[key] = value
-    current_job["updated_at"] = datetime.utcnow()
-    mock_jobs[job_index] = current_job
-    return current_job
-
-@router.delete("/{job_id}")
-async def delete_job(job_id: str, current_user: dict = Depends(get_current_user)):
-    """Delete a job posting"""
-    global mock_jobs
-    initial_len = len(mock_jobs)
-    mock_jobs = [job for job in mock_jobs if job["id"] != job_id]
-    if len(mock_jobs) == initial_len:
-        raise HTTPException(status_code=404, detail="Job not found")
-    return {"message": "Job deleted successfully"}
-
-@router.get("/{job_id}/applications")
-async def get_job_applications(job_id: str, current_user: dict = Depends(get_current_user)):
-    """Get applications for a specific job (mock data)"""
-    job = next((job for job in mock_jobs if job["id"] == job_id), None)
-    if job is None:
-        raise HTTPException(status_code=404, detail="Job not found")
-    
-    try:
-        applications = [
+# Initialize with some demo data
+def initialize_demo_jobs():
+    """Initialize with demo jobs"""
+    if len(jobs_storage) == 0:
+        demo_jobs = [
             {
-                "id": "app1",
-                "resume_id": "resume1",
-                "candidate_name": "Alice Smith",
-                "status": "pending",
-                "applied_at": "2024-01-01T12:00:00Z",
-                "match_score": 92,
-                "cover_letter": "I am highly interested in this position..."
+                "id": "demo_job_1",
+                "title": "Senior Frontend Developer",
+                "description": "We are looking for a Senior Frontend Developer with expertise in React, JavaScript, and modern web technologies. The ideal candidate should have 5+ years of experience building scalable web applications and a strong understanding of UI/UX principles.",
+                "requirements": ["React", "JavaScript", "TypeScript", "CSS", "HTML", "Git", "REST APIs"],
+                "status": "active",
+                "department": "Engineering",
+                "location": "Remote",
+                "salary_range": "$80,000 - $120,000",
+                "created_at": datetime.utcnow().isoformat(),
+                "updated_at": datetime.utcnow().isoformat(),
+                "created_by": "demo_user"
             },
             {
-                "id": "app2",
-                "resume_id": "resume2",
-                "candidate_name": "Bob Johnson",
-                "status": "reviewed",
-                "applied_at": "2024-01-02T10:30:00Z",
-                "match_score": 88,
-                "cover_letter": "My experience aligns perfectly..."
+                "id": "demo_job_2",
+                "title": "Backend Python Developer",
+                "description": "Join our team as a Backend Python Developer. You will work with Django, PostgreSQL, and cloud technologies to build robust backend systems. Experience with microservices and containerization is a plus.",
+                "requirements": ["Python", "Django", "PostgreSQL", "REST API", "AWS", "Docker", "Git"],
+                "status": "active",
+                "department": "Engineering",
+                "location": "New York, NY",
+                "salary_range": "$75,000 - $110,000",
+                "created_at": datetime.utcnow().isoformat(),
+                "updated_at": datetime.utcnow().isoformat(),
+                "created_by": "demo_user"
             },
             {
-                "id": "app3",
-                "resume_id": "resume3",
-                "candidate_name": "Charlie Brown",
-                "status": "interview_scheduled",
-                "applied_at": "2024-01-04T14:15:00Z",
-                "match_score": 95,
-                "cover_letter": "With my 5 years of experience..."
+                "id": "demo_job_3",
+                "title": "Full Stack Java Developer",
+                "description": "We need a Full Stack Java Developer experienced in Spring Boot, microservices architecture, and modern frontend frameworks. You will be responsible for developing end-to-end solutions.",
+                "requirements": ["Java", "Spring Boot", "Microservices", "React", "Docker", "Kubernetes", "MySQL"],
+                "status": "active",
+                "department": "Engineering",
+                "location": "San Francisco, CA",
+                "salary_range": "$90,000 - $130,000",
+                "created_at": datetime.utcnow().isoformat(),
+                "updated_at": datetime.utcnow().isoformat(),
+                "created_by": "demo_user"
             }
         ]
-        
-        return {
-            "job_id": job_id,
-            "job_title": job["title"],
-            "total_applications": len(applications),
-            "applications": applications
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching applications: {str(e)}")
+        jobs_storage.extend(demo_jobs)
+        logger.info(f"Initialized with {len(demo_jobs)} demo jobs")
 
-@router.get("/dashboard/stats")
-async def get_dashboard_stats(current_user: dict = Depends(get_current_user)):
-    """Get dashboard statistics"""
+# Initialize demo data on module load
+initialize_demo_jobs()
+
+# API Routes
+@router.post("/")
+async def create_job(job_data: JobCreate):
+    """Create a new job posting"""
     try:
-        total_jobs = len(mock_jobs)
-        active_jobs = len([job for job in mock_jobs if job["status"] == "active"])
-        total_applications = sum(job["applications_count"] for job in mock_jobs)
+        new_job = {
+            "id": str(uuid.uuid4()),
+            "title": job_data.title,
+            "description": job_data.description,
+            "requirements": job_data.requirements or [],
+            "status": job_data.status or "active",
+            "department": job_data.department,
+            "location": job_data.location,
+            "salary_range": job_data.salary_range,
+            "created_at": datetime.utcnow().isoformat(),
+            "updated_at": datetime.utcnow().isoformat(),
+            "created_by": "demo_user"  # No auth, so use demo user
+        }
+        
+        jobs_storage.append(new_job)
+        
+        logger.info(f"Job created successfully: {job_data.title}")
         
         return {
-            "total_jobs": total_jobs,
-            "active_jobs": active_jobs,
-            "total_applications": total_applications,
-            "total_candidates": 48,  # Mock data
-            "total_resumes": 156,    # Mock data
-            "total_interviews": 23,  # Mock data
-            "avg_match_score": 92,
-            "avg_time_to_hire": 4.2,
-            "interview_success_rate": 85
+            "success": True,
+            "message": "Job created successfully",
+            "job": new_job
         }
+        
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching dashboard stats: {str(e)}")
+        logger.error(f"Create job error: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error creating job: {str(e)}"
+        )
+
+@router.get("/")
+async def list_jobs(
+    skip: int = 0,
+    limit: int = 100,
+    status_filter: Optional[str] = None,
+    department: Optional[str] = None
+):
+    """List all jobs with optional filtering"""
+    try:
+        # Filter jobs
+        filtered_jobs = jobs_storage
+        
+        if status_filter:
+            filtered_jobs = [j for j in filtered_jobs if j.get("status") == status_filter]
+        
+        if department:
+            filtered_jobs = [j for j in filtered_jobs if j.get("department") == department]
+        
+        # Pagination
+        total = len(filtered_jobs)
+        jobs_page = filtered_jobs[skip:skip + limit]
+        
+        return {
+            "success": True,
+            "jobs": jobs_page,
+            "total": total,
+            "page": skip // limit + 1,
+            "per_page": limit,
+            "has_more": skip + limit < total
+        }
+        
+    except Exception as e:
+        logger.error(f"List jobs error: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error retrieving jobs: {str(e)}"
+        )
+
+@router.get("/stats/overview")
+async def get_job_stats():
+    """Get job statistics"""
+    try:
+        total_jobs = len(jobs_storage)
+        active_jobs = len([j for j in jobs_storage if j.get("status") == "active"])
+        inactive_jobs = total_jobs - active_jobs
+        
+        # Department analysis
+        departments = {}
+        for job in jobs_storage:
+            dept = job.get("department", "Unknown")
+            departments[dept] = departments.get(dept, 0) + 1
+        
+        # Requirements analysis
+        all_requirements = []
+        for job in jobs_storage:
+            all_requirements.extend(job.get("requirements", []))
+        
+        requirement_counts = {}
+        for req in all_requirements:
+            requirement_counts[req] = requirement_counts.get(req, 0) + 1
+        
+        top_requirements = sorted(requirement_counts.items(), key=lambda x: x[1], reverse=True)[:10]
+        
+        return {
+            "success": True,
+            "stats": {
+                "total_jobs": total_jobs,
+                "active_jobs": active_jobs,
+                "inactive_jobs": inactive_jobs,
+                "departments": departments,
+                "top_requirements": [{"requirement": req, "count": count} for req, count in top_requirements],
+                "average_requirements_per_job": len(all_requirements) / total_jobs if total_jobs > 0 else 0
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Job stats error: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error retrieving job statistics: {str(e)}"
+        )
