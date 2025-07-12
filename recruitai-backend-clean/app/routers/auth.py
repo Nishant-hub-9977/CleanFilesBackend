@@ -2,6 +2,7 @@ import os
 import logging
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from pydantic import BaseModel  # Added import to fix NameError
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from datetime import datetime, timedelta, timezone
@@ -10,13 +11,13 @@ from sqlalchemy import Column, Integer, String, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db, Base
-from ..schemas.auth import UserRegister, UserLogin, Token, TokenData, PasswordReset, PasswordResetConfirm, ChangePassword  # Import schemas for validation
+from ..schemas.auth import UserRegister, UserLogin, Token, TokenData, PasswordReset, PasswordResetConfirm, ChangePassword  # Import schemas
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 logger = logging.getLogger(__name__)
 
-SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key")  # Env-safe, no deployment conflict
+SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key")  # Env-safe
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 REFRESH_TOKEN_EXPIRE_DAYS = 7
@@ -26,18 +27,18 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
 class UserDB(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True, index=True)
-    username = Column(String, unique=True, index=True)  # Aligned with schema
+    username = Column(String, unique=True, index=True)  # Aligned
     email = Column(String, unique=True, index=True)
     hashed_password = Column(String)
     company_name = Column(String)
     phone_number = Column(String, nullable=True)
     role = Column(String, default="user")  # Aligned
 
-class User(BaseModel):  # Defined here to fix NameError - matches /me return
+class User(BaseModel):  # Now inherits correctly
     email: str
     role: str
 
-async def get_user(db: AsyncSession, identifier: str):  # username/email support
+async def get_user(db: AsyncSession, identifier: str):  # username/email
     query = select(UserDB).where((UserDB.email == identifier) | (UserDB.username == identifier))
     result = await db.execute(query)
     return result.scalar_one_or_none()
@@ -74,7 +75,7 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: AsyncSession
     return user
 
 @router.post("/login", response_model=Token)
-async def login_for_access_token(form_data: UserLogin = Depends(), db: AsyncSession = Depends(get_db)):  # Use schema, no conflict
+async def login_for_access_token(form_data: UserLogin = Depends(), db: AsyncSession = Depends(get_db)):
     user = await get_user(db, form_data.username_or_email)
     if not user or not verify_password(form_data.password, user.hashed_password):
         logger.warning(f"Failed login for {form_data.username_or_email}")
@@ -85,7 +86,7 @@ async def login_for_access_token(form_data: UserLogin = Depends(), db: AsyncSess
     return {"access_token": access_token, "refresh_token": refresh_token, "token_type": "bearer"}
 
 @router.post("/register", response_model=Token)
-async def register_user(user_data: UserRegister, db: AsyncSession = Depends(get_db)):  # Use schema, auto-validates
+async def register_user(user_data: UserRegister, db: AsyncSession = Depends(get_db)):
     existing_user = await get_user(db, user_data.email) or await get_user(db, user_data.username)
     if existing_user:
         raise HTTPException(status_code=400, detail="Email or username already registered")
@@ -107,7 +108,7 @@ async def register_user(user_data: UserRegister, db: AsyncSession = Depends(get_
     return {"access_token": access_token, "refresh_token": refresh_token, "token_type": "bearer"}
 
 @router.post("/password-reset")
-async def password_reset(reset_data: PasswordReset, db: AsyncSession = Depends(get_db)):  # From schema, safe addition
+async def password_reset(reset_data: PasswordReset, db: AsyncSession = Depends(get_db)):
     user = await get_user(db, reset_data.email)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -116,7 +117,7 @@ async def password_reset(reset_data: PasswordReset, db: AsyncSession = Depends(g
     return {"message": "Reset token sent", "token": reset_token}  # Prod: email token
 
 @router.post("/password-reset-confirm")
-async def password_reset_confirm(confirm_data: PasswordResetConfirm, db: AsyncSession = Depends(get_db)):  # From schema
+async def password_reset_confirm(confirm_data: PasswordResetConfirm, db: AsyncSession = Depends(get_db)):
     try:
         payload = jwt.decode(confirm_data.token, SECRET_KEY, algorithms=[ALGORITHM])
         if payload.get("scope") != "reset":
@@ -134,7 +135,7 @@ async def password_reset_confirm(confirm_data: PasswordResetConfirm, db: AsyncSe
     return {"message": "Password reset successful"}
 
 @router.post("/change-password")
-async def change_password(change_data: ChangePassword, current_user: UserDB = Depends(get_current_user), db: AsyncSession = Depends(get_db)):  # From schema
+async def change_password(change_data: ChangePassword, current_user: UserDB = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     if not verify_password(change_data.current_password, current_user.hashed_password):
         raise HTTPException(status_code=400, detail="Incorrect current password")
     hashed_password = get_password_hash(change_data.new_password)
